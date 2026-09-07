@@ -26,7 +26,7 @@ jobs:
         run: |
           set -e
           sudo apt-get update
-          sudo apt-get install -y unzip curl jq
+          sudo apt-get install -y unzip curl jq xz-utils
           rm -rf work tools recovered output release-files
           mkdir -p work tools recovered output release-files
 
@@ -127,29 +127,83 @@ jobs:
         run: |
           set -e
 
+          echo "===== ASSETRIPPER 2.0.0 RELEASE ASSETS ====="
+
+          gh api \
+            repos/AssetRipper/AssetRipper/releases/tags/2.0.0 \
+            --jq '.assets[].name' \
+            | tee output/assetripper-assets.txt
+
+          ASSET=$(
+            grep -Ei \
+              '^AssetRipper_linux_(x64|amd64|64).*(\.tar\.xz|\.zip)$' \
+              output/assetripper-assets.txt \
+              | head -1
+          )
+
+          if [ -z "$ASSET" ]; then
+            ASSET=$(
+              grep -Ei \
+                'linux.*(x64|amd64|64).*(\.tar\.xz|\.zip)$' \
+                output/assetripper-assets.txt \
+                | head -1
+            )
+          fi
+
+          if [ -z "$ASSET" ]; then
+            echo "ERROR: no Linux x64 AssetRipper archive found in release 2.0.0"
+            cat output/assetripper-assets.txt
+            exit 1
+          fi
+
+          echo "SELECTED_ASSET=$ASSET"
+
           gh release download 2.0.0 \
             -R AssetRipper/AssetRipper \
-            -p "AssetRipper_linux_x64.zip" \
+            -p "$ASSET" \
             -D tools
 
-          unzip -q tools/AssetRipper_linux_x64.zip -d tools/assetripper
+          ARCHIVE="tools/$ASSET"
+          test -s "$ARCHIVE"
+
+          mkdir -p tools/assetripper
+
+          case "$ARCHIVE" in
+            *.tar.xz)
+              tar -xJf "$ARCHIVE" -C tools/assetripper
+              ;;
+            *.zip)
+              unzip -q "$ARCHIVE" -d tools/assetripper
+              ;;
+            *)
+              echo "ERROR: unsupported AssetRipper archive: $ARCHIVE"
+              exit 1
+              ;;
+          esac
+
+          echo "===== ASSETRIPPER FILES ====="
+          find tools/assetripper -maxdepth 4 -type f -print | head -200
 
           RIPPER=$(
             find tools/assetripper \
               -type f \
-              -name "AssetRipper.GUI.Free" \
+              \( -name "AssetRipper.GUI.Free" \
+                 -o -name "AssetRipper.GUI.Free.exe" \
+                 -o -name "AssetRipper.GUI" \
+                 -o -name "AssetRipper" \) \
               | head -1
           )
 
           if [ -z "$RIPPER" ]; then
-            echo "ERROR: AssetRipper.GUI.Free not found"
-            find tools/assetripper -maxdepth 3 -type f -print
+            echo "ERROR: AssetRipper executable not found after extraction"
             exit 1
           fi
 
           chmod +x "$RIPPER"
           echo "$RIPPER" > output/assetripper-path.txt
-          "$RIPPER" --help | head -80 || true
+
+          echo "ASSETRIPPER=$RIPPER"
+          "$RIPPER" --help | head -120 || true
 
       - name: Recover Unity project with AssetRipper
         run: |
@@ -207,25 +261,36 @@ jobs:
           wait "$RIPPER_PID" 2>/dev/null || true
 
           echo "===== RECOVERED ROOT ====="
-          find "$EXPORT_DIR" -maxdepth 2 -type d | head -120
+          find "$EXPORT_DIR" -maxdepth 3 -type d | head -180
 
-          if [ ! -d "$EXPORT_DIR/Assets" ]; then
-            echo "ERROR: AssetRipper did not export Assets/"
+          PROJECT=""
+
+          if [ -d "$EXPORT_DIR/ExportedProject/Assets" ]; then
+            PROJECT="$EXPORT_DIR/ExportedProject"
+          elif [ -d "$EXPORT_DIR/Assets" ]; then
+            PROJECT="$EXPORT_DIR"
+          fi
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: AssetRipper did not export a Unity Assets/ directory"
             tail -250 output/assetripper.log || true
             exit 1
           fi
 
-          if [ ! -d "$EXPORT_DIR/ProjectSettings" ]; then
+          if [ ! -d "$PROJECT/ProjectSettings" ]; then
             echo "ERROR: AssetRipper did not export ProjectSettings/"
             tail -250 output/assetripper.log || true
             exit 1
           fi
 
+          echo "$PROJECT" > output/recovered-project-path.txt
+          echo "RECOVERED_PROJECT=$PROJECT"
+
       - name: Prepare recovered project for iOS
         run: |
           set -e
 
-          PROJECT="recovered/Sonic2006"
+          PROJECT=$(cat output/recovered-project-path.txt)
 
           mkdir -p output/original-managed
           cp \
@@ -282,7 +347,7 @@ jobs:
         run: |
           set -e
 
-          PROJECT="recovered/Sonic2006"
+          PROJECT=$(cat output/recovered-project-path.txt)
 
           {
             echo "SONIC 2006 iOS PORT - RECOVERY REPORT"
@@ -311,6 +376,8 @@ jobs:
             recovered/Sonic2006
             output/RECOVERY-REPORT.txt
             output/assetripper.log
+            output/assetripper-assets.txt
+            output/recovered-project-path.txt
             output/mobile-input-markers.txt
             output/scenes.txt
             output/android-csharp-references.txt
