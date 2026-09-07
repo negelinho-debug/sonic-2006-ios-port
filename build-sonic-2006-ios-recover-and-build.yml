@@ -1,0 +1,526 @@
+name: Sonic 2006 iOS Port - Recover + Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      try_ios_build:
+        description: "Try Unity iOS build after recovery"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    name: Recover Unity project
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y unzip curl jq
+          rm -rf work tools recovered output release-files
+          mkdir -p work tools recovered output release-files
+
+      - name: Find Sonic APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          APK=""
+
+          while IFS= read -r FILE; do
+            [ -z "$FILE" ] && continue
+
+            if unzip -l "$FILE" 2>/dev/null | grep -q "assets/bin/Data/Managed/Assembly-CSharp.dll"; then
+              APK="$FILE"
+              break
+            fi
+          done < <(
+            find . \
+              -type f \
+              -iname "*.apk" \
+              -not -path "./.git/*" \
+              | sort
+          )
+
+          if [ -z "$APK" ]; then
+            set +e
+            TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+            if [ -n "$TAG" ]; then
+              gh release download "$TAG" \
+                --dir release-files \
+                --pattern "*.apk"
+            fi
+            set -e
+
+            while IFS= read -r FILE; do
+              [ -z "$FILE" ] && continue
+
+              if unzip -l "$FILE" 2>/dev/null | grep -q "assets/bin/Data/Managed/Assembly-CSharp.dll"; then
+                APK="$FILE"
+                break
+              fi
+            done < <(
+              find release-files -type f -iname "*.apk" | sort
+            )
+          fi
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: Unity Mono APK not found."
+            echo "Put com.gistix.sonicthehedgehog.apk in the repo or latest Release."
+            exit 1
+          fi
+
+          echo "APK=$APK" | tee output/apk-path.txt
+          cp "$APK" work/Sonic2006.apk
+          ls -lh work/Sonic2006.apk
+
+      - name: Extract and verify exact game
+        run: |
+          set -e
+
+          mkdir -p work/android
+          unzip -q work/Sonic2006.apk -d work/android
+
+          test -f work/android/assets/bin/Data/globalgamemanagers
+          test -f work/android/assets/bin/Data/Managed/Assembly-CSharp.dll
+          test -f work/android/assets/bin/Data/level0
+
+          VERSION=$(
+            strings work/android/assets/bin/Data/globalgamemanagers \
+              | grep -Eo '20[0-9]{2}\.[0-9]+\.[0-9]+[abfp][0-9]+' \
+              | head -1
+          )
+
+          echo "UNITY_VERSION=$VERSION" | tee output/unity-version.txt
+
+          if [ "$VERSION" != "2018.2.0f2" ]; then
+            echo "ERROR: expected Unity 2018.2.0f2, found: $VERSION"
+            exit 1
+          fi
+
+          echo "===== MANAGED CODE ====="
+          ls -lh work/android/assets/bin/Data/Managed/Assembly-CSharp.dll
+
+          echo "===== ANDROID NATIVE LIBS ====="
+          find work/android/lib -maxdepth 2 -type f -print || true
+
+          echo "===== MOBILE INPUT MARKERS ====="
+          strings work/android/assets/bin/Data/Managed/Assembly-CSharp.dll \
+            | grep -E 'VirtualJoystick|AButton|BButton|XButton|YButton|StartButton|BackButton|GameInput' \
+            | sort -u \
+            | tee output/mobile-input-markers.txt || true
+
+      - name: Download AssetRipper 2.0.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          gh release download 2.0.0 \
+            -R AssetRipper/AssetRipper \
+            -p "AssetRipper_linux_x64.zip" \
+            -D tools
+
+          unzip -q tools/AssetRipper_linux_x64.zip -d tools/assetripper
+
+          RIPPER=$(
+            find tools/assetripper \
+              -type f \
+              -name "AssetRipper.GUI.Free" \
+              | head -1
+          )
+
+          if [ -z "$RIPPER" ]; then
+            echo "ERROR: AssetRipper.GUI.Free not found"
+            find tools/assetripper -maxdepth 3 -type f -print
+            exit 1
+          fi
+
+          chmod +x "$RIPPER"
+          echo "$RIPPER" > output/assetripper-path.txt
+          "$RIPPER" --help | head -80 || true
+
+      - name: Recover Unity project with AssetRipper
+        run: |
+          set -e
+
+          RIPPER=$(cat output/assetripper-path.txt)
+          PORT=3333
+
+          "$RIPPER" \
+            --headless \
+            --port "$PORT" \
+            > output/assetripper.log 2>&1 &
+
+          RIPPER_PID=$!
+          echo "$RIPPER_PID" > output/assetripper.pid
+
+          READY=0
+
+          for i in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "ERROR: AssetRipper web service did not start."
+            tail -200 output/assetripper.log || true
+            exit 1
+          fi
+
+          DATA_DIR="$PWD/work/android/assets/bin/Data"
+          EXPORT_DIR="$PWD/recovered/Sonic2006"
+
+          mkdir -p "$EXPORT_DIR"
+
+          echo "===== LOAD UNITY DATA ====="
+          curl -fsS -L \
+            -X POST \
+            --data-urlencode "Path=$DATA_DIR" \
+            "http://127.0.0.1:${PORT}/LoadFolder" \
+            >/dev/null
+
+          echo "===== EXPORT UNITY PROJECT ====="
+          curl -fsS -L \
+            -X POST \
+            --data-urlencode "Path=$EXPORT_DIR" \
+            --data-urlencode "CreateSubfolder=false" \
+            "http://127.0.0.1:${PORT}/Export/UnityProject" \
+            >/dev/null
+
+          kill "$RIPPER_PID" 2>/dev/null || true
+          wait "$RIPPER_PID" 2>/dev/null || true
+
+          echo "===== RECOVERED ROOT ====="
+          find "$EXPORT_DIR" -maxdepth 2 -type d | head -120
+
+          if [ ! -d "$EXPORT_DIR/Assets" ]; then
+            echo "ERROR: AssetRipper did not export Assets/"
+            tail -250 output/assetripper.log || true
+            exit 1
+          fi
+
+          if [ ! -d "$EXPORT_DIR/ProjectSettings" ]; then
+            echo "ERROR: AssetRipper did not export ProjectSettings/"
+            tail -250 output/assetripper.log || true
+            exit 1
+          fi
+
+      - name: Prepare recovered project for iOS
+        run: |
+          set -e
+
+          PROJECT="recovered/Sonic2006"
+
+          mkdir -p output/original-managed
+          cp \
+            work/android/assets/bin/Data/Managed/Assembly-CSharp.dll \
+            output/original-managed/Assembly-CSharp.dll
+
+          # Android native binaries cannot run on iOS.
+          # Keep a report, but remove Android-only plugins from the Unity project.
+          find "$PROJECT/Assets" \
+            -type f \
+            \( -iname "*.so" -o -iname "*.aar" -o -iname "*.jar" \) \
+            -print \
+            | tee output/removed-android-plugins.txt || true
+
+          find "$PROJECT/Assets" \
+            -type f \
+            \( -iname "*.so" -o -iname "*.aar" -o -iname "*.jar" \) \
+            -delete || true
+
+          rm -rf "$PROJECT/Assets/Plugins/Android" || true
+
+          mkdir -p "$PROJECT/ProjectSettings"
+
+          cat > "$PROJECT/ProjectSettings/ProjectVersion.txt" <<'EOF'
+          m_EditorVersion: 2018.2.0f2
+          m_EditorVersionWithRevision: 2018.2.0f2
+          EOF
+
+          echo "===== C# FILES ====="
+          find "$PROJECT/Assets" -type f -name "*.cs" | wc -l | tee output/csharp-count.txt
+
+          echo "===== SCENES ====="
+          find "$PROJECT/Assets" -type f -name "*.unity" \
+            | sort \
+            | tee output/scenes.txt
+
+          echo "===== ANDROID-SPECIFIC C# REFERENCES ====="
+          grep -RniE \
+            'AndroidJava|RuntimePlatform\.Android|UNITY_ANDROID|GooglePlay|AdMob|BillingClient' \
+            "$PROJECT/Assets" \
+            --include="*.cs" \
+            | head -200 \
+            | tee output/android-csharp-references.txt || true
+
+          echo "===== TOUCH / MOBILE REFERENCES ====="
+          grep -RniE \
+            'VirtualJoystick|Touch|AButton|BButton|XButton|YButton|StartButton|BackButton' \
+            "$PROJECT/Assets" \
+            --include="*.cs" \
+            | head -250 \
+            | tee output/touch-csharp-references.txt || true
+
+      - name: Create recovery report
+        run: |
+          set -e
+
+          PROJECT="recovered/Sonic2006"
+
+          {
+            echo "SONIC 2006 iOS PORT - RECOVERY REPORT"
+            echo "====================================="
+            echo
+            echo "Original APK: $(cat output/apk-path.txt | sed 's/^APK=//')"
+            echo "Unity: $(cat output/unity-version.txt | sed 's/^UNITY_VERSION=//')"
+            echo "Mono Assembly-CSharp.dll: YES"
+            echo "Recovered Assets/: YES"
+            echo "Recovered ProjectSettings/: YES"
+            echo "Android native plugins removed from recovered project: YES"
+            echo
+            echo "Recovered C# files: $(find "$PROJECT/Assets" -type f -name '*.cs' | wc -l)"
+            echo "Recovered scenes: $(find "$PROJECT/Assets" -type f -name '*.unity' | wc -l)"
+            echo
+            echo "Next target: Unity 2018.2.0f2 iOS / arm64."
+          } > output/RECOVERY-REPORT.txt
+
+          cat output/RECOVERY-REPORT.txt
+
+      - name: Upload recovered Sonic project
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonic-2006-Recovered-Unity-Project
+          path: |
+            recovered/Sonic2006
+            output/RECOVERY-REPORT.txt
+            output/assetripper.log
+            output/mobile-input-markers.txt
+            output/scenes.txt
+            output/android-csharp-references.txt
+            output/touch-csharp-references.txt
+            output/removed-android-plugins.txt
+          compression-level: 0
+
+  build_unity_ios:
+    name: Build Unity iOS project
+    needs: recover
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+      UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+      UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+
+    outputs:
+      unity_result: ${{ steps.unity_build.outcome }}
+
+    steps:
+      - name: Check whether iOS build should run
+        id: gate
+        env:
+          TRY_IOS: ${{ inputs.try_ios_build }}
+        run: |
+          set -e
+
+          if [ "$TRY_IOS" != "true" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "iOS build disabled by workflow input."
+            exit 0
+          fi
+
+          if [ -z "$UNITY_LICENSE" ] || [ -z "$UNITY_EMAIL" ] || [ -z "$UNITY_PASSWORD" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Unity secrets are not configured."
+            echo "Recovery artifact is still available."
+            exit 0
+          fi
+
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Download recovered project
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: Sonic-2006-Recovered-Unity-Project
+          path: recovered-artifact
+
+      - name: Locate Unity project
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          set -e
+
+          PROJECT=$(
+            find recovered-artifact \
+              -type f \
+              -path "*/ProjectSettings/ProjectVersion.txt" \
+              -print \
+              | head -1 \
+              | xargs dirname \
+              | xargs dirname
+          )
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: recovered Unity project not found."
+            exit 1
+          fi
+
+          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
+          echo "PROJECT=$PROJECT"
+
+      - name: Build iOS Xcode project with Unity 2018.2.0f2
+        if: steps.gate.outputs.ready == 'true'
+        id: unity_build
+        continue-on-error: true
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          projectPath: ${{ env.PROJECT }}
+          targetPlatform: iOS
+          unityVersion: 2018.2.0f2
+          customImage: unityci/editor:ubuntu-2018.2.0f2-ios-3.2.2
+          buildsPath: build
+          buildName: Sonic2006-iOS
+          allowDirtyBuild: true
+          versioning: None
+
+      - name: Upload Unity iOS result
+        if: steps.gate.outputs.ready == 'true' && steps.unity_build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonic-2006-iOS-Xcode
+          path: build
+          compression-level: 0
+
+      - name: Upload Unity failure project
+        if: steps.gate.outputs.ready == 'true' && steps.unity_build.outcome != 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonic-2006-Unity-iOS-FAIL
+          path: |
+            recovered-artifact
+          compression-level: 0
+
+  package_unsigned_ipa:
+    name: Package unsigned IPA
+    needs: build_unity_ios
+    if: needs.build_unity_ios.outputs.unity_result == 'success'
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Download Unity Xcode project
+        uses: actions/download-artifact@v4
+        with:
+          name: Sonic-2006-iOS-Xcode
+          path: unity-ios
+
+      - name: Patch old Unity 2018 headers for current Xcode
+        run: |
+          set -e
+
+          find unity-ios -type f \
+            \( -name "UnityInterface.h" -o -name "UnityRendering.h" \) \
+            -print \
+            | while read -r FILE; do
+                if ! grep -q "<stdbool.h>" "$FILE"; then
+                  printf '#include <stdbool.h>\n' | cat - "$FILE" > "$FILE.tmp"
+                  mv "$FILE.tmp" "$FILE"
+                fi
+              done
+
+      - name: Build unsigned arm64 app
+        run: |
+          set -e
+          set -o pipefail
+
+          PROJ=$(find unity-ios -type d -name "*.xcodeproj" | head -1)
+
+          if [ -z "$PROJ" ]; then
+            echo "ERROR: Unity Xcode project not found."
+            find unity-ios -maxdepth 4 -type f | head -200
+            exit 1
+          fi
+
+          echo "XCODE_PROJECT=$PROJ"
+
+          xcodebuild \
+            -project "$PROJ" \
+            -target Unity-iPhone \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$PWD/DerivedData" \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=15.0 \
+            PRODUCT_BUNDLE_IDENTIFIER="com.sonic2006.ios.port" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build \
+            2>&1 | tee xcodebuild.log
+
+      - name: Locate app and create KSign IPA
+        run: |
+          set -e
+
+          APP=$(find DerivedData -type d -name "*.app" | head -1)
+
+          if [ -z "$APP" ]; then
+            echo "ERROR: built .app not found."
+            exit 1
+          fi
+
+          rm -rf Payload output
+          mkdir -p Payload output
+
+          cp -R "$APP" Payload/
+
+          # KSign will perform the real signing on the iPhone.
+          ditto \
+            -c \
+            -k \
+            --sequesterRsrc \
+            --keepParent \
+            Payload \
+            output/Sonic-2006-iOS-KSign.ipa
+
+          ls -lh output/Sonic-2006-iOS-KSign.ipa
+
+      - name: Upload Sonic iOS IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonic-2006-iOS-KSign
+          path: |
+            output/Sonic-2006-iOS-KSign.ipa
+            xcodebuild.log
+          compression-level: 0
+
+      - name: Upload Xcode failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonic-2006-Xcode-FAIL
+          path: xcodebuild.log
+          if-no-files-found: ignore
