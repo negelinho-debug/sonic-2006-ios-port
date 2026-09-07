@@ -1,4 +1,5 @@
-name: Sonic 2006 iOS Port - Recover + Build
+
+name: Sonic 2006 iOS - FIX405 v2
 
 on:
   workflow_dispatch:
@@ -242,20 +243,51 @@ jobs:
 
           mkdir -p "$EXPORT_DIR"
 
+          echo "===== FIX405 ACTIVE ====="
           echo "===== LOAD UNITY DATA ====="
-          curl -fsS -L \
-            -X POST \
-            --data-urlencode "Path=$DATA_DIR" \
-            "http://127.0.0.1:${PORT}/LoadFolder" \
-            >/dev/null
+
+          LOAD_CODE=$(
+            curl -sS \
+              -o output/loadfolder-response.txt \
+              -w "%{http_code}" \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              --data-urlencode "Path=$DATA_DIR" \
+              "http://127.0.0.1:${PORT}/LoadFolder"
+          )
+
+          echo "LOADFOLDER_HTTP=$LOAD_CODE"
+
+          if [ "$LOAD_CODE" != "302" ] && [ "$LOAD_CODE" != "200" ]; then
+            echo "ERROR: AssetRipper /LoadFolder returned HTTP $LOAD_CODE"
+            echo "===== RESPONSE ====="
+            cat output/loadfolder-response.txt || true
+            echo "===== ASSETRIPPER LOG ====="
+            tail -250 output/assetripper.log || true
+            exit 1
+          fi
 
           echo "===== EXPORT UNITY PROJECT ====="
-          curl -fsS -L \
-            -X POST \
-            --data-urlencode "Path=$EXPORT_DIR" \
-            --data-urlencode "CreateSubfolder=false" \
-            "http://127.0.0.1:${PORT}/Export/UnityProject" \
-            >/dev/null
+
+          EXPORT_CODE=$(
+            curl -sS \
+              -o output/export-response.txt \
+              -w "%{http_code}" \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              --data-urlencode "Path=$EXPORT_DIR" \
+              --data-urlencode "CreateSubfolder=false" \
+              "http://127.0.0.1:${PORT}/Export/UnityProject"
+          )
+
+          echo "EXPORT_HTTP=$EXPORT_CODE"
+
+          if [ "$EXPORT_CODE" != "302" ] && [ "$EXPORT_CODE" != "200" ]; then
+            echo "ERROR: AssetRipper /Export/UnityProject returned HTTP $EXPORT_CODE"
+            echo "===== RESPONSE ====="
+            cat output/export-response.txt || true
+            echo "===== ASSETRIPPER LOG ====="
+            tail -250 output/assetripper.log || true
+            exit 1
+          fi
 
           kill "$RIPPER_PID" 2>/dev/null || true
           wait "$RIPPER_PID" 2>/dev/null || true
@@ -376,6 +408,8 @@ jobs:
             recovered/Sonic2006
             output/RECOVERY-REPORT.txt
             output/assetripper.log
+            output/loadfolder-response.txt
+            output/export-response.txt
             output/assetripper-assets.txt
             output/recovered-project-path.txt
             output/mobile-input-markers.txt
