@@ -1,4 +1,4 @@
-name: Sonic 2006 iOS - NO PC v12
+name: Sonic 2006 iOS - NO PC v13
 
 on:
   workflow_dispatch:
@@ -496,12 +496,12 @@ jobs:
           echo "Recovered ProjectVersion.txt:"
           cat "${{ steps.locate.outputs.version_file }}"
 
-      - name: V12 stabilize old Unity project for Linux CI
+      - name: V13 stabilize old Unity project for Linux CI
         run: |
           set -e
 
           PROJECT="${{ steps.locate.outputs.project }}"
-          echo "===== V12 OLD-UNITY STABILITY PATCH ====="
+          echo "===== V13 OLD-UNITY STABILITY PATCH ====="
 
           # Start the first attempt from a clean import. The second attempt below
           # intentionally keeps the freshly generated Library cache, because v11
@@ -510,14 +510,14 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$PROJECT" 2>/dev/null || true
           chmod -R u+rwX "$PROJECT" 2>/dev/null || true
 
-          # Do not change game assets/settings here: v12 is a safe retry and
-          # diagnostics pass, so a successful Xcode export keeps the game's audio
-          # and other original project settings intact.
-          cat > "$PROJECT/V12-CI-PATCH.txt" <<'EOF'
-          Sonic 2006 iOS v12 CI patch
+          # Attempt 1 preserves the game assets/settings; attempt 2 only resets GraphicsSettings.
+          # The original GraphicsSettings is backed up before the fallback retry.
+          cat > "$PROJECT/V13-CI-PATCH.txt" <<'EOF'
+          Sonic 2006 iOS v13 CI patch
           - clean first import
-          - retry once with warm Library if the first Unity process aborts
-          - preserve original game assets and ProjectSettings
+          - force legacy OpenGL Core and single-threaded graphics
+          - retry with regenerated GraphicsSettings if Unity still aborts
+          - collect the real Unity Editor diagnostics
           EOF
 
       - name: Setup Node 22 for Unity CLI
@@ -859,6 +859,9 @@ jobs:
           buildName: Sonic2006-iOS
           allowDirtyBuild: true
           versioning: None
+          customParameters: -force-glcore -force-gfx-st
+          collectUnityLogs: true
+          streamUnityLogs: true
 
       - name: Inspect attempt 1
         id: detect_xcode_1
@@ -882,16 +885,27 @@ jobs:
             echo "Attempt 1 did not generate Xcode."
           fi
 
-      - name: Prepare warm retry after Unity abort
+      - name: Prepare graphics-safe retry after Unity abort
         if: steps.detect_xcode_1.outputs.ready != 'true'
         run: |
           set +e
 
           PROJECT="${{ steps.locate.outputs.project }}"
-          echo "===== V12 WARM RETRY ====="
-          echo "Keeping Library/ from attempt 1 so Unity does not have to re-import everything."
+          echo "===== V13 GRAPHICS-SAFE RETRY ====="
+          echo "Attempt 1 used legacy GL Core + single-threaded graphics."
+          echo "For attempt 2 we also regenerate GraphicsSettings.asset."
 
-          # Temp can contain stale locks after an abort; Library is the useful cache.
+          mkdir -p v13-backup
+
+          if [ -f "$PROJECT/ProjectSettings/GraphicsSettings.asset" ]; then
+            cp "$PROJECT/ProjectSettings/GraphicsSettings.asset"               v13-backup/GraphicsSettings.asset.original
+            rm -f "$PROJECT/ProjectSettings/GraphicsSettings.asset"
+            echo "Original GraphicsSettings.asset backed up."
+          else
+            echo "GraphicsSettings.asset was already absent."
+          fi
+
+          # Temp/obj can contain stale locks after SIGABRT. Keep Library warm.
           sudo rm -rf "$PROJECT/Temp" "$PROJECT/obj" 2>/dev/null || true
           sudo chown -R "$(id -u):$(id -g)" "$PROJECT" 2>/dev/null || true
           chmod -R u+rwX "$PROJECT" 2>/dev/null || true
@@ -918,6 +932,9 @@ jobs:
           buildName: Sonic2006-iOS
           allowDirtyBuild: true
           versioning: None
+          customParameters: -force-glcore -force-gfx-st
+          collectUnityLogs: true
+          streamUnityLogs: true
 
       - name: Detect generated iOS Xcode project
         id: detect_xcode
@@ -925,7 +942,7 @@ jobs:
         run: |
           set +e
 
-          echo "===== V12 FINAL XCODE DETECTION ====="
+          echo "===== V13 FINAL XCODE DETECTION ====="
           echo "ATTEMPT1=${{ steps.unity_build_1.outcome }} / engine=${{ steps.unity_build_1.outputs.engineExitCode }}"
           echo "ATTEMPT2=${{ steps.unity_build_2.outcome }} / engine=${{ steps.unity_build_2.outputs.engineExitCode }}"
 
@@ -969,7 +986,7 @@ jobs:
           mkdir -p unity-build-diagnostics
 
           {
-            echo "V12=true"
+            echo "V13=true"
             echo "ATTEMPT1_OUTCOME=${{ steps.unity_build_1.outcome }}"
             echo "ATTEMPT1_ENGINE_EXIT=${{ steps.unity_build_1.outputs.engineExitCode }}"
             echo "ATTEMPT2_OUTCOME=${{ steps.unity_build_2.outcome }}"
@@ -987,6 +1004,7 @@ jobs:
             "$HOME/.config/unity3d" \
             "$PROJECT" \
             build \
+            "$GITHUB_WORKSPACE/Logs/UnityDiagnostics" \
             /tmp
           do
             [ -e "$BASE" ] || continue
@@ -1017,6 +1035,16 @@ jobs:
               2>/dev/null || true
           done < unity-build-diagnostics/log-files.txt
 
+          if [ -d "$GITHUB_WORKSPACE/Logs/UnityDiagnostics" ]; then
+            mkdir -p unity-build-diagnostics/GameCI-UnityDiagnostics
+            cp -a "$GITHUB_WORKSPACE/Logs/UnityDiagnostics"/.               unity-build-diagnostics/GameCI-UnityDiagnostics/ 2>/dev/null || true
+          fi
+
+          if [ -d v13-backup ]; then
+            mkdir -p unity-build-diagnostics/v13-backup
+            cp -a v13-backup/. unity-build-diagnostics/v13-backup/ 2>/dev/null || true
+          fi
+
           sudo chown -R "$(id -u):$(id -g)" unity-build-diagnostics || true
           chmod -R u+rwX unity-build-diagnostics || true
 
@@ -1041,7 +1069,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-Unity-Build-Diagnostics-v12
+          name: Sonic-2006-Unity-Build-Diagnostics-v13
           path: unity-build-diagnostics
           if-no-files-found: ignore
           compression-level: 0
@@ -1068,7 +1096,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-Unity-iOS-FAIL-v12
+          name: Sonic-2006-Unity-iOS-FAIL-v13
           path: recovered-artifact
           if-no-files-found: ignore
           compression-level: 0
