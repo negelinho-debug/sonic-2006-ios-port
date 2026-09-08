@@ -1,5 +1,4 @@
-
-name: Sonic 2006 iOS - FIX405 v2
+name: Sonic 2006 iOS - NO PC v1
 
 on:
   workflow_dispatch:
@@ -420,51 +419,52 @@ jobs:
           compression-level: 0
 
   build_unity_ios:
-    name: Build Unity iOS project
+    name: Activate + Build Unity iOS
     needs: recover
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     env:
-      UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-      UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+      UNITY_USERNAME: ${{ secrets.UNITY_USERNAME }}
       UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+      UNITY_EMAIL: ${{ secrets.UNITY_USERNAME }}
 
     outputs:
       unity_result: ${{ steps.unity_build.outcome }}
 
     steps:
-      - name: Check whether iOS build should run
+      - name: Check Unity login secrets
         id: gate
-        env:
-          TRY_IOS: ${{ inputs.try_ios_build }}
         run: |
           set -e
 
-          if [ "$TRY_IOS" != "true" ]; then
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "iOS build disabled by workflow input."
-            exit 0
+          if [ -z "$UNITY_USERNAME" ]; then
+            echo "ERROR: UNITY_USERNAME secret is missing"
+            exit 1
           fi
 
-          if [ -z "$UNITY_LICENSE" ] || [ -z "$UNITY_EMAIL" ] || [ -z "$UNITY_PASSWORD" ]; then
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "Unity secrets are not configured."
-            echo "Recovery artifact is still available."
-            exit 0
+          if [ -z "$UNITY_PASSWORD" ]; then
+            echo "ERROR: UNITY_PASSWORD secret is missing"
+            exit 1
           fi
 
-          echo "ready=true" >> "$GITHUB_OUTPUT"
+          echo "UNITY LOGIN SECRETS: OK"
+
+      - name: Activate Unity Personal
+        id: activate
+        uses: buildalon/activate-unity-license@v2
+        with:
+          license: personal
+          username: ${{ secrets.UNITY_USERNAME }}
+          password: ${{ secrets.UNITY_PASSWORD }}
 
       - name: Download recovered project
-        if: steps.gate.outputs.ready == 'true'
         uses: actions/download-artifact@v4
         with:
           name: Sonic-2006-Recovered-Unity-Project
           path: recovered-artifact
 
       - name: Locate Unity project
-        if: steps.gate.outputs.ready == 'true'
         run: |
           set -e
 
@@ -486,14 +486,15 @@ jobs:
           echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
           echo "PROJECT=$PROJECT"
 
+          echo "===== PROJECT VERSION ====="
+          cat "$PROJECT/ProjectSettings/ProjectVersion.txt"
+
       - name: Build iOS Xcode project with Unity 2018.2.0f2
-        if: steps.gate.outputs.ready == 'true'
         id: unity_build
         continue-on-error: true
         uses: game-ci/unity-builder@v4
         env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_EMAIL: ${{ secrets.UNITY_USERNAME }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
           projectPath: ${{ env.PROJECT }}
@@ -505,8 +506,13 @@ jobs:
           allowDirtyBuild: true
           versioning: None
 
+      - name: Show Unity build result
+        if: always()
+        run: |
+          echo "UNITY_BUILD_OUTCOME=${{ steps.unity_build.outcome }}"
+
       - name: Upload Unity iOS result
-        if: steps.gate.outputs.ready == 'true' && steps.unity_build.outcome == 'success'
+        if: steps.unity_build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: Sonic-2006-iOS-Xcode
@@ -514,7 +520,7 @@ jobs:
           compression-level: 0
 
       - name: Upload Unity failure project
-        if: steps.gate.outputs.ready == 'true' && steps.unity_build.outcome != 'success'
+        if: steps.unity_build.outcome != 'success'
         uses: actions/upload-artifact@v4
         with:
           name: Sonic-2006-Unity-iOS-FAIL
