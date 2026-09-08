@@ -1,4 +1,4 @@
-name: Sonic 2006 iOS - NO PC v2
+name: Sonic 2006 iOS - NO PC v3
 
 on:
   workflow_dispatch:
@@ -419,7 +419,7 @@ jobs:
           compression-level: 0
 
   build_unity_ios:
-    name: Activate + Build Unity iOS
+    name: Setup + Activate + Build Unity iOS
     needs: recover
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -434,7 +434,6 @@ jobs:
 
     steps:
       - name: Check Unity login secrets
-        id: gate
         run: |
           set -e
 
@@ -450,52 +449,6 @@ jobs:
 
           echo "UNITY LOGIN SECRETS: OK"
 
-      - name: Install Unity Hub on GitHub runner
-        run: |
-          set -e
-
-          echo "===== INSTALL UNITY HUB ====="
-
-          sudo apt-get update
-          sudo apt-get install -y \
-            ca-certificates \
-            gnupg \
-            wget \
-            libnss3 \
-            libgtk-3-0 \
-            libasound2t64 || \
-          sudo apt-get install -y \
-            ca-certificates \
-            gnupg \
-            wget \
-            libnss3 \
-            libgtk-3-0 \
-            libasound2
-
-          wget -qO- https://hub.unity3d.com/linux/keys/public \
-            | gpg --dearmor \
-            | sudo tee /usr/share/keyrings/Unity_Technologies_ApS.gpg \
-              >/dev/null
-
-          echo "deb [signed-by=/usr/share/keyrings/Unity_Technologies_ApS.gpg] https://hub.unity3d.com/linux/repos/deb stable main" \
-            | sudo tee /etc/apt/sources.list.d/unityhub.list \
-              >/dev/null
-
-          sudo apt-get update
-          sudo apt-get install -y unityhub
-
-          echo "===== UNITY HUB CHECK ====="
-          command -v unityhub
-          unityhub --version || true
-
-      - name: Activate Unity Personal
-        id: activate
-        uses: buildalon/activate-unity-license@v2
-        with:
-          license: personal
-          username: ${{ secrets.UNITY_USERNAME }}
-          password: ${{ secrets.UNITY_PASSWORD }}
-
       - name: Download recovered project
         uses: actions/download-artifact@v4
         with:
@@ -503,6 +456,7 @@ jobs:
           path: recovered-artifact
 
       - name: Locate Unity project
+        id: locate
         run: |
           set -e
 
@@ -521,11 +475,107 @@ jobs:
             exit 1
           fi
 
+          VERSION_FILE="$PROJECT/ProjectSettings/ProjectVersion.txt"
+
+          test -f "$VERSION_FILE"
+
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+          echo "version_file=$VERSION_FILE" >> "$GITHUB_OUTPUT"
+
           echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
-          echo "PROJECT=$PROJECT"
 
           echo "===== PROJECT VERSION ====="
-          cat "$PROJECT/ProjectSettings/ProjectVersion.txt"
+          cat "$VERSION_FILE"
+
+      - name: Setup Unity Hub + Unity 2018.2.0f2
+        id: unity_setup
+        uses: buildalon/unity-setup@v2
+        with:
+          version-file: ${{ steps.locate.outputs.version_file }}
+          unity-version: 2018.2.0f2 (787658998520)
+          cache-installation: true
+
+      - name: Verify Unity setup paths
+        run: |
+          set -e
+
+          echo "UNITY_HUB_PATH=$UNITY_HUB_PATH"
+          echo "UNITY_EDITOR_PATH=$UNITY_EDITOR_PATH"
+          echo "UNITY_PROJECT_PATH=$UNITY_PROJECT_PATH"
+
+          if [ -z "$UNITY_HUB_PATH" ]; then
+            echo "ERROR: buildalon/unity-setup did not set UNITY_HUB_PATH"
+            exit 1
+          fi
+
+          if [ -z "$UNITY_EDITOR_PATH" ]; then
+            echo "ERROR: buildalon/unity-setup did not set UNITY_EDITOR_PATH"
+            exit 1
+          fi
+
+          test -e "$UNITY_HUB_PATH"
+          test -e "$UNITY_EDITOR_PATH"
+
+      - name: Activate Unity Personal
+        id: activate
+        uses: buildalon/activate-unity-license@v2
+        with:
+          license: personal
+          username: ${{ secrets.UNITY_USERNAME }}
+          password: ${{ secrets.UNITY_PASSWORD }}
+          license-version: 6.x
+
+      - name: Export activated Personal license for GameCI
+        id: export_license
+        run: |
+          set -e
+
+          echo "===== FIND ACTIVATED UNITY LICENSE ====="
+
+          LICENSE_FILE=""
+
+          for CANDIDATE in \
+            "$HOME/.local/share/unity3d/Unity/Unity_lic.ulf" \
+            "$HOME/.config/unity3d/Unity/Unity_lic.ulf"
+          do
+            if [ -s "$CANDIDATE" ]; then
+              LICENSE_FILE="$CANDIDATE"
+              break
+            fi
+          done
+
+          if [ -z "$LICENSE_FILE" ]; then
+            LICENSE_FILE=$(
+              find "$HOME" \
+                -type f \
+                \( -name "Unity_lic.ulf" -o -name "*.ulf" \) \
+                2>/dev/null \
+                | head -1
+            )
+          fi
+
+          if [ -z "$LICENSE_FILE" ] || [ ! -s "$LICENSE_FILE" ]; then
+            echo "ERROR: Unity activation completed but no .ulf license file was found"
+            echo "===== LICENSING DIRECTORIES ====="
+            find "$HOME/.local/share" "$HOME/.config" \
+              -maxdepth 5 \
+              -type f \
+              2>/dev/null \
+              | grep -Ei 'unity|license|ulf' \
+              | head -200 || true
+            exit 1
+          fi
+
+          echo "LICENSE_FILE=$LICENSE_FILE"
+
+          {
+            echo "UNITY_LICENSE<<UNITY_LICENSE_EOF"
+            cat "$LICENSE_FILE"
+            echo
+            echo "UNITY_LICENSE_EOF"
+          } >> "$GITHUB_ENV"
+
+          echo "Unity Personal license exported for the next build step."
 
       - name: Build iOS Xcode project with Unity 2018.2.0f2
         id: unity_build
@@ -534,8 +584,9 @@ jobs:
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_USERNAME }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          UNITY_LICENSE: ${{ env.UNITY_LICENSE }}
         with:
-          projectPath: ${{ env.PROJECT }}
+          projectPath: ${{ steps.locate.outputs.project }}
           targetPlatform: iOS
           unityVersion: 2018.2.0f2
           customImage: unityci/editor:ubuntu-2018.2.0f2-ios-3.2.2
