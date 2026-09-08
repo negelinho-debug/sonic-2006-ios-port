@@ -1,4 +1,4 @@
-name: Sonic 2006 iOS - NO PC v7
+name: Sonic 2006 iOS - NO PC v8
 
 on:
   workflow_dispatch:
@@ -542,33 +542,52 @@ jobs:
             | grep -E '/opt/unityhub|/usr/bin/unityhub' \
             | head -120 || true
 
-          echo "===== CREATE PATH EXPECTED BY UNITY-CLI ====="
+          echo "===== DETECT INSTALLED HUB ====="
 
-          if [ -x /opt/unityhub/unityhub-bin ]; then
-            sudo ln -sfn \
-              /opt/unityhub/unityhub-bin \
-              /opt/unityhub/unityhub
-          fi
+          HUB_CMD="$(command -v unityhub || true)"
 
-          if [ ! -x /opt/unityhub/unityhub ]; then
-            echo "ERROR: /opt/unityhub/unityhub still missing"
-            find /opt/unityhub -maxdepth 2 -type f -print || true
+          if [ -z "$HUB_CMD" ]; then
+            echo "ERROR: unityhub command not found after apt install"
+            dpkg -L unityhub || true
             exit 1
           fi
+
+          echo "HUB_CMD=$HUB_CMD"
+          ls -l "$HUB_CMD" || true
+          file "$HUB_CMD" || true
+          readlink -f "$HUB_CMD" || true
+
+          echo "===== CREATE COMPATIBILITY HUB PATH ====="
+
+          # Current Ubuntu Unity Hub package on this runner installs
+          # /usr/bin/unityhub instead of /opt/unityhub/unityhub.
+          # unity-cli still expects /opt/unityhub/unityhub on Linux.
+          sudo mkdir -p /opt/unityhub
+
+          sudo tee /opt/unityhub/unityhub >/dev/null <<EOF
+          #!/bin/bash
+          exec xvfb-run -a "$HUB_CMD" --no-sandbox --headless "\$@"
+          EOF
+
+          sudo chmod +x /opt/unityhub/unityhub
+
+          test -x /opt/unityhub/unityhub
+          test -e "$HUB_CMD"
 
           echo "UNITY_HUB_PATH=/opt/unityhub/unityhub" \
             >> "$GITHUB_ENV"
 
           echo "/opt/unityhub" >> "$GITHUB_PATH"
 
-          echo "===== HUB READY ====="
-          ls -lh \
-            /opt/unityhub/unityhub \
-            /opt/unityhub/unityhub-bin || true
+          echo "===== V8 HUB READY ====="
+          ls -lh /opt/unityhub/unityhub "$HUB_CMD" || true
 
           echo "===== UNITY-CLI HUB CHECK ====="
-          unity-cli hub-path || true
-          unity-cli hub-version || true
+          UNITY_HUB_PATH=/opt/unityhub/unityhub \
+            unity-cli hub-path || true
+
+          UNITY_HUB_PATH=/opt/unityhub/unityhub \
+            unity-cli hub-version || true
 
       - name: Activate Unity Personal with Unity CLI
         env:
@@ -576,10 +595,11 @@ jobs:
         run: |
           set -e
 
-          echo "===== V7 ACTIVATE PERSONAL ====="
+          echo "===== V8 ACTIVATE PERSONAL ====="
           echo "UNITY_HUB_PATH=$UNITY_HUB_PATH"
 
           test -x "$UNITY_HUB_PATH"
+          test -e /usr/bin/unityhub
 
           unity-cli activate-license \
             --license personal \
@@ -612,7 +632,11 @@ jobs:
 
           if [ -z "$LICENSE_FILE" ]; then
             LICENSE_FILE=$(
-              find "$HOME" \
+              find \
+                "$HOME" \
+                /root \
+                /usr/share/unity3d \
+                /var/lib/unity3d \
                 -type f \
                 \( -name "Unity_lic.ulf" -o -name "*.ulf" \) \
                 2>/dev/null \
