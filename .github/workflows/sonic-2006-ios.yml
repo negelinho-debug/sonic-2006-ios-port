@@ -1,4 +1,4 @@
-name: Sonic 2006 iOS - NO PC v3
+name: Sonic 2006 iOS - NO PC v4
 
 on:
   workflow_dispatch:
@@ -347,7 +347,7 @@ jobs:
 
           cat > "$PROJECT/ProjectSettings/ProjectVersion.txt" <<'EOF'
           m_EditorVersion: 2018.2.0f2
-          m_EditorVersionWithRevision: 2018.2.0f2
+          m_EditorVersionWithRevision: 2018.2.0f2 (787658998520)
           EOF
 
           echo "===== C# FILES ====="
@@ -487,11 +487,19 @@ jobs:
           echo "===== PROJECT VERSION ====="
           cat "$VERSION_FILE"
 
+      - name: Verify fixed Unity version metadata
+        run: |
+          set -e
+          echo "===== V4 CHANGESET FIX ACTIVE ====="
+          echo "Expected editor: 2018.2.0f2 (787658998520)"
+          echo "Recovered ProjectVersion.txt:"
+          cat "${{ steps.locate.outputs.version_file }}"
+
       - name: Setup Unity Hub + Unity 2018.2.0f2
         id: unity_setup
         uses: buildalon/unity-setup@v2
         with:
-          version-file: ${{ steps.locate.outputs.version_file }}
+          version-file: None
           unity-version: 2018.2.0f2 (787658998520)
           cache-installation: true
 
