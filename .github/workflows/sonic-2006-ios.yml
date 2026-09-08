@@ -1,4 +1,4 @@
-name: Sonic 2006 iOS - NO PC v6
+name: Sonic 2006 iOS - NO PC v7
 
 on:
   workflow_dispatch:
@@ -504,7 +504,7 @@ jobs:
         run: |
           set -e
 
-          echo "===== V6 UNITY-CLI FIX ACTIVE ====="
+          echo "===== V7 HUB SYMLINK FIX ACTIVE ====="
 
           npm install -g @rage-against-the-pixel/unity-cli
 
@@ -512,18 +512,74 @@ jobs:
           unity-cli --help >/dev/null
           echo "unity-cli: OK"
 
-          echo "===== INSTALL UNITY HUB ====="
-          unity-cli hub-install --auto-update
+          echo "===== INSTALL UNITY HUB DIRECTLY ====="
 
-          echo "===== HUB INFO ====="
-          unity-cli hub-path
-          unity-cli hub-version
+          sudo apt-get update
+          sudo apt-get install -y \
+            ca-certificates \
+            curl \
+            gnupg \
+            xvfb \
+            libgbm1 \
+            libgtk-3-0 \
+            libnss3
+
+          sudo install -d -m 0755 /etc/apt/keyrings
+
+          curl -fsSL https://hub.unity3d.com/linux/keys/public \
+            | sudo gpg --dearmor \
+              -o /etc/apt/keyrings/unityhub.gpg
+
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/unityhub.gpg] https://hub.unity3d.com/linux/repos/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/unityhub.list \
+              >/dev/null
+
+          sudo apt-get update
+          sudo apt-get install -y unityhub
+
+          echo "===== HUB PACKAGE FILES ====="
+          dpkg -L unityhub \
+            | grep -E '/opt/unityhub|/usr/bin/unityhub' \
+            | head -120 || true
+
+          echo "===== CREATE PATH EXPECTED BY UNITY-CLI ====="
+
+          if [ -x /opt/unityhub/unityhub-bin ]; then
+            sudo ln -sfn \
+              /opt/unityhub/unityhub-bin \
+              /opt/unityhub/unityhub
+          fi
+
+          if [ ! -x /opt/unityhub/unityhub ]; then
+            echo "ERROR: /opt/unityhub/unityhub still missing"
+            find /opt/unityhub -maxdepth 2 -type f -print || true
+            exit 1
+          fi
+
+          echo "UNITY_HUB_PATH=/opt/unityhub/unityhub" \
+            >> "$GITHUB_ENV"
+
+          echo "/opt/unityhub" >> "$GITHUB_PATH"
+
+          echo "===== HUB READY ====="
+          ls -lh \
+            /opt/unityhub/unityhub \
+            /opt/unityhub/unityhub-bin || true
+
+          echo "===== UNITY-CLI HUB CHECK ====="
+          unity-cli hub-path || true
+          unity-cli hub-version || true
 
       - name: Activate Unity Personal with Unity CLI
+        env:
+          UNITY_HUB_PATH: /opt/unityhub/unityhub
         run: |
           set -e
 
-          echo "===== ACTIVATE PERSONAL ====="
+          echo "===== V7 ACTIVATE PERSONAL ====="
+          echo "UNITY_HUB_PATH=$UNITY_HUB_PATH"
+
+          test -x "$UNITY_HUB_PATH"
 
           unity-cli activate-license \
             --license personal \
