@@ -1,4 +1,4 @@
-name: Sonic 2006 iOS - NO PC v17
+name: Sonic 2006 iOS - NO PC v18
 
 on:
   workflow_dispatch:
@@ -560,7 +560,7 @@ jobs:
           set -e
 
           PROJECT="${{ steps.locate.outputs.project }}"
-          echo "===== V17 DUPLICATE UNITY MODULE FIX ====="
+          echo "===== V18 XCODE SCHEME FIX ====="
 
           # Start the first attempt from a clean import. The second attempt below
           # intentionally keeps the freshly generated Library cache, because v11
@@ -571,12 +571,12 @@ jobs:
 
           # Attempt 1 preserves the game assets/settings; attempt 2 only resets GraphicsSettings.
           # The original GraphicsSettings is backed up before the fallback retry.
-          cat > "$PROJECT/V17-CI-PATCH.txt" <<'EOF'
-          Sonic 2006 iOS v17 CI patch
-          - keep the working v16 C# runtime/compiler fix
-          - remove AssetRipper's duplicate UnityEngine.SpatialTrackingModule.dll
-          - fix the exact CS1704 that prevented GameCI Builder from compiling
-          - keep the previous iOS/graphics fixes and full crash diagnostics
+          cat > "$PROJECT/V18-CI-PATCH.txt" <<'EOF'
+          Sonic 2006 iOS v18 CI patch
+          - keep all working Unity fixes from v16/v17
+          - fix the exact v17 Xcode CLI error: -derivedDataPath cannot be used with -target
+          - build the generated Unity project with the Unity-iPhone scheme
+          - keep unsigned arm64 output for KSign packaging
           EOF
 
       - name: Setup Node 22 for Unity CLI
@@ -948,7 +948,7 @@ jobs:
           set +e
 
           PROJECT="${{ steps.locate.outputs.project }}"
-          echo "===== V17 WARM RETRY ====="
+          echo "===== V18 WARM RETRY ====="
           echo "Attempt 1 used legacy GL Core + single-threaded graphics."
           echo "For attempt 2 we also regenerate GraphicsSettings.asset."
 
@@ -997,7 +997,7 @@ jobs:
         run: |
           set +e
 
-          echo "===== V17 FINAL XCODE DETECTION ====="
+          echo "===== V18 FINAL XCODE DETECTION ====="
           echo "ATTEMPT1=${{ steps.unity_build_1.outcome }} / engine=${{ steps.unity_build_1.outputs.engineExitCode }}"
           echo "ATTEMPT2=${{ steps.unity_build_2.outcome }} / engine=${{ steps.unity_build_2.outputs.engineExitCode }}"
 
@@ -1041,7 +1041,7 @@ jobs:
           mkdir -p unity-build-diagnostics
 
           {
-            echo "V17=true"
+            echo "V18=true"
             echo "ATTEMPT1_OUTCOME=${{ steps.unity_build_1.outcome }}"
             echo "ATTEMPT1_ENGINE_EXIT=${{ steps.unity_build_1.outputs.engineExitCode }}"
             echo "ATTEMPT2_OUTCOME=${{ steps.unity_build_2.outcome }}"
@@ -1130,7 +1130,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-Unity-Build-Diagnostics-v17
+          name: Sonic-2006-Unity-Build-Diagnostics-v18
           path: unity-build-diagnostics
           if-no-files-found: ignore
           compression-level: 0
@@ -1157,7 +1157,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-Unity-iOS-FAIL-v17
+          name: Sonic-2006-Unity-iOS-FAIL-v18
           path: recovered-artifact
           if-no-files-found: ignore
           compression-level: 0
@@ -1205,9 +1205,34 @@ jobs:
 
           echo "XCODE_PROJECT=$PROJ"
 
+          echo "===== XCODE PROJECT SCHEMES ====="
+          xcodebuild -project "$PROJ" -list || true
+
+          # Modern Xcode does not allow -derivedDataPath together with -target.
+          # Unity's generated app scheme is normally Unity-iPhone, so use
+          # -scheme instead. This is the exact fix for v17 exit code 64.
+          SCHEME="Unity-iPhone"
+
+          if ! xcodebuild -project "$PROJ" -list 2>/dev/null \
+                | grep -A50 "Schemes:" \
+                | grep -qE '^[[:space:]]*Unity-iPhone[[:space:]]*$'; then
+            DETECTED_SCHEME=$(
+              xcodebuild -project "$PROJ" -list 2>/dev/null \
+                | awk '
+                    /Schemes:/ {in_schemes=1; next}
+                    in_schemes && NF {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); print; exit}
+                  '
+            )
+            if [ -n "$DETECTED_SCHEME" ]; then
+              SCHEME="$DETECTED_SCHEME"
+            fi
+          fi
+
+          echo "XCODE_SCHEME=$SCHEME"
+
           xcodebuild \
             -project "$PROJ" \
-            -target Unity-iPhone \
+            -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphoneos \
             -destination "generic/platform=iOS" \
@@ -1346,7 +1371,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-FULL-Unity-Log-v17
+          name: Sonic-2006-FULL-Unity-Log-v18
           path: full-unity-log
           if-no-files-found: warn
           compression-level: 0
