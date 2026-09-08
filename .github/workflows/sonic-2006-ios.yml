@@ -1,4 +1,4 @@
-name: Sonic 2006 iOS - NO PC v4
+name: Sonic 2006 iOS - NO PC v6
 
 on:
   workflow_dispatch:
@@ -490,48 +490,48 @@ jobs:
       - name: Verify fixed Unity version metadata
         run: |
           set -e
-          echo "===== V4 CHANGESET FIX ACTIVE ====="
+          echo "===== V5 DIRECT HUB FIX ACTIVE ====="
           echo "Expected editor: 2018.2.0f2 (787658998520)"
           echo "Recovered ProjectVersion.txt:"
           cat "${{ steps.locate.outputs.version_file }}"
 
-      - name: Setup Unity Hub + Unity 2018.2.0f2
-        id: unity_setup
-        uses: buildalon/unity-setup@v2
+      - name: Setup Node 22 for Unity CLI
+        uses: actions/setup-node@v4
         with:
-          version-file: None
-          unity-version: 2018.2.0f2 (787658998520)
-          cache-installation: true
+          node-version: "22"
 
-      - name: Verify Unity setup paths
+      - name: Install Unity CLI + Unity Hub
         run: |
           set -e
 
-          echo "UNITY_HUB_PATH=$UNITY_HUB_PATH"
-          echo "UNITY_EDITOR_PATH=$UNITY_EDITOR_PATH"
-          echo "UNITY_PROJECT_PATH=$UNITY_PROJECT_PATH"
+          echo "===== V6 UNITY-CLI FIX ACTIVE ====="
 
-          if [ -z "$UNITY_HUB_PATH" ]; then
-            echo "ERROR: buildalon/unity-setup did not set UNITY_HUB_PATH"
-            exit 1
-          fi
+          npm install -g @rage-against-the-pixel/unity-cli
 
-          if [ -z "$UNITY_EDITOR_PATH" ]; then
-            echo "ERROR: buildalon/unity-setup did not set UNITY_EDITOR_PATH"
-            exit 1
-          fi
+          echo "===== UNITY CLI ====="
+          unity-cli --help >/dev/null
+          echo "unity-cli: OK"
 
-          test -e "$UNITY_HUB_PATH"
-          test -e "$UNITY_EDITOR_PATH"
+          echo "===== INSTALL UNITY HUB ====="
+          unity-cli hub-install --auto-update
 
-      - name: Activate Unity Personal
-        id: activate
-        uses: buildalon/activate-unity-license@v2
-        with:
-          license: personal
-          username: ${{ secrets.UNITY_USERNAME }}
-          password: ${{ secrets.UNITY_PASSWORD }}
-          license-version: 6.x
+          echo "===== HUB INFO ====="
+          unity-cli hub-path
+          unity-cli hub-version
+
+      - name: Activate Unity Personal with Unity CLI
+        run: |
+          set -e
+
+          echo "===== ACTIVATE PERSONAL ====="
+
+          unity-cli activate-license \
+            --license personal \
+            --email "$UNITY_USERNAME" \
+            --password "$UNITY_PASSWORD"
+
+          echo "===== LICENSE CONTEXT ====="
+          unity-cli license-context || true
 
       - name: Export activated Personal license for GameCI
         id: export_license
@@ -544,7 +544,9 @@ jobs:
 
           for CANDIDATE in \
             "$HOME/.local/share/unity3d/Unity/Unity_lic.ulf" \
-            "$HOME/.config/unity3d/Unity/Unity_lic.ulf"
+            "$HOME/.config/unity3d/Unity/Unity_lic.ulf" \
+            "/root/.local/share/unity3d/Unity/Unity_lic.ulf" \
+            "/root/.config/unity3d/Unity/Unity_lic.ulf"
           do
             if [ -s "$CANDIDATE" ]; then
               LICENSE_FILE="$CANDIDATE"
@@ -575,6 +577,7 @@ jobs:
           fi
 
           echo "LICENSE_FILE=$LICENSE_FILE"
+          echo "LICENSE_SIZE=$(wc -c < "$LICENSE_FILE" | tr -d ' ') bytes"
 
           {
             echo "UNITY_LICENSE<<UNITY_LICENSE_EOF"
