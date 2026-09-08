@@ -1,4 +1,4 @@
-name: Sonic 2006 iOS - NO PC v8
+name: Sonic 2006 iOS - NO PC v9
 
 on:
   workflow_dispatch:
@@ -589,25 +589,100 @@ jobs:
           UNITY_HUB_PATH=/opt/unityhub/unityhub \
             unity-cli hub-version || true
 
-      - name: Activate Unity Personal with Unity CLI
+      - name: Activate Unity Personal - skip broken precheck
         env:
           UNITY_HUB_PATH: /opt/unityhub/unityhub
         run: |
           set -e
 
-          echo "===== V8 ACTIVATE PERSONAL ====="
+          echo "===== V9 PERSONAL ACTIVATION FIX ACTIVE ====="
           echo "UNITY_HUB_PATH=$UNITY_HUB_PATH"
 
           test -x "$UNITY_HUB_PATH"
           test -e /usr/bin/unityhub
 
-          unity-cli activate-license \
-            --license personal \
-            --email "$UNITY_USERNAME" \
-            --password "$UNITY_PASSWORD"
+          GLOBAL_NODE_MODULES="$(npm root -g)"
+          LICENSE_MODULE="$GLOBAL_NODE_MODULES/@rage-against-the-pixel/unity-cli/dist/license-client.js"
+
+          if [ ! -f "$LICENSE_MODULE" ]; then
+            echo "ERROR: unity-cli licensing module not found:"
+            echo "$LICENSE_MODULE"
+            find "$GLOBAL_NODE_MODULES/@rage-against-the-pixel/unity-cli" \
+              -maxdepth 3 \
+              -type f \
+              -iname "*license-client*" \
+              -print || true
+            exit 1
+          fi
+
+          echo "LICENSE_MODULE=$LICENSE_MODULE"
+          export LICENSE_MODULE
+
+          # unity-cli normally checks active entitlements before activation.
+          # On a fresh runner that precheck can fail before --activate-ulf runs.
+          # The library API exposes skipEntitlementCheck as Activate(..., true).
+          node <<'NODE'
+          const {
+            LicensingClient,
+            LicenseType
+          } = require(process.env.LICENSE_MODULE);
+
+          async function main() {
+            const client = new LicensingClient('6.x');
+
+            await client.Activate(
+              {
+                licenseType: LicenseType.personal,
+                username: process.env.UNITY_USERNAME,
+                password: process.env.UNITY_PASSWORD
+              },
+              true
+            );
+
+            console.log("UNITY PERSONAL ACTIVATION: SUCCESS");
+          }
+
+          main().catch((error) => {
+            console.error("UNITY PERSONAL ACTIVATION FAILED:");
+            console.error(error && error.message ? error.message : error);
+            process.exit(1);
+          });
+          NODE
 
           echo "===== LICENSE CONTEXT ====="
           unity-cli license-context || true
+
+      - name: Collect Unity licensing diagnostics
+        if: failure()
+        run: |
+          set +e
+
+          mkdir -p licensing-diagnostics
+
+          LOG_PATH="$(unity-cli licensing-client-logs 2>/dev/null | tail -1 || true)"
+          AUDIT_PATH="$(unity-cli licensing-audit-logs 2>/dev/null | tail -1 || true)"
+
+          echo "LOG_PATH=$LOG_PATH"
+          echo "AUDIT_PATH=$AUDIT_PATH"
+
+          if [ -n "$LOG_PATH" ] && [ -f "$LOG_PATH" ]; then
+            cp "$LOG_PATH" licensing-diagnostics/Unity.Licensing.Client.log
+            tail -160 "$LOG_PATH" || true
+          fi
+
+          if [ -n "$AUDIT_PATH" ] && [ -f "$AUDIT_PATH" ]; then
+            cp "$AUDIT_PATH" licensing-diagnostics/Unity.Entitlements.Audit.log
+            tail -160 "$AUDIT_PATH" || true
+          fi
+
+      - name: Upload Unity licensing diagnostics artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonic-2006-Unity-License-Diagnostics-v9
+          path: licensing-diagnostics
+          if-no-files-found: ignore
+          compression-level: 0
 
       - name: Export activated Personal license for GameCI
         id: export_license
