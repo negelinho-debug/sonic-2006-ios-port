@@ -1,4 +1,4 @@
-name: Sonic 2006 iOS - NO PC v10
+name: Sonic 2006 iOS - NO PC v11
 
 on:
   workflow_dispatch:
@@ -431,6 +431,7 @@ jobs:
 
     outputs:
       unity_result: ${{ steps.unity_build.outcome }}
+      xcode_ready: ${{ steps.detect_xcode.outputs.ready }}
 
     steps:
       - name: Check Unity login secrets
@@ -840,27 +841,141 @@ jobs:
         run: |
           echo "UNITY_BUILD_OUTCOME=${{ steps.unity_build.outcome }}"
 
-      - name: Upload Unity iOS result
-        if: steps.unity_build.outcome == 'success'
+      - name: Detect generated iOS Xcode project
+        id: detect_xcode
+        if: always()
+        run: |
+          set +e
+
+          echo "===== V11 DETECT XCODE OUTPUT ====="
+
+          # Docker-based Unity builds can leave root-owned files behind.
+          sudo chown -R "$(id -u):$(id -g)" build 2>/dev/null || true
+          chmod -R u+rwX build 2>/dev/null || true
+
+          PROJ=$(
+            find build \
+              -type d \
+              -name "*.xcodeproj" \
+              -print 2>/dev/null \
+              | head -1
+          )
+
+          if [ -n "$PROJ" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "XCODE_PROJECT_FOUND=$PROJ"
+            find "$(dirname "$PROJ")" -maxdepth 2 -type f | head -120 || true
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "No Xcode project was generated."
+          fi
+
+      - name: Collect Unity build diagnostics
+        if: always() && steps.unity_build.outcome != 'success'
+        run: |
+          set +e
+
+          mkdir -p unity-build-diagnostics
+
+          {
+            echo "UNITY_BUILD_OUTCOME=${{ steps.unity_build.outcome }}"
+            echo "XCODE_READY=${{ steps.detect_xcode.outputs.ready }}"
+            echo "PROJECT=${{ steps.locate.outputs.project }}"
+          } > unity-build-diagnostics/summary.txt
+
+          echo "===== FIND UNITY LOGS ====="
+
+          for BASE in \
+            "$HOME/.local/share/unity3d" \
+            "$HOME/.config/unity3d" \
+            "${{ steps.locate.outputs.project }}" \
+            build
+          do
+            [ -e "$BASE" ] || continue
+
+            sudo find "$BASE" \
+              -type f \
+              \( -iname "*.log" \
+                 -o -iname "Editor.log" \
+                 -o -iname "*.txt" \) \
+              -size -20M \
+              -print 2>/dev/null \
+              | head -120
+          done > unity-build-diagnostics/log-files.txt || true
+
+          while IFS= read -r FILE; do
+            [ -f "$FILE" ] || continue
+
+            SAFE_NAME=$(
+              echo "$FILE" \
+                | sed 's#^/##; s#[/ ]#_#g'
+            )
+
+            sudo cp "$FILE" \
+              "unity-build-diagnostics/$SAFE_NAME" \
+              2>/dev/null || true
+          done < unity-build-diagnostics/log-files.txt
+
+          sudo chown -R "$(id -u):$(id -g)" unity-build-diagnostics || true
+          chmod -R u+rwX unity-build-diagnostics || true
+
+          grep -RniE \
+            'error CS[0-9]+|Compilation failed|compiler error|Exception|error:|failed|FAILURE' \
+            unity-build-diagnostics \
+            > unity-build-diagnostics/important-errors.txt \
+            2>/dev/null || true
+
+          echo "===== IMPORTANT UNITY ERRORS ====="
+          tail -240 unity-build-diagnostics/important-errors.txt || true
+
+      - name: Upload Unity iOS Xcode result
+        if: steps.detect_xcode.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: Sonic-2006-iOS-Xcode
           path: build
           compression-level: 0
 
-      - name: Upload Unity failure project
+      - name: Upload Unity build diagnostics
         if: steps.unity_build.outcome != 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-Unity-iOS-FAIL
-          path: |
-            recovered-artifact
+          name: Sonic-2006-Unity-Build-Diagnostics-v11
+          path: unity-build-diagnostics
+          if-no-files-found: ignore
+          compression-level: 0
+
+      - name: Clean failed recovered project permissions
+        if: steps.unity_build.outcome != 'success'
+        run: |
+          set +e
+
+          PROJECT="${{ steps.locate.outputs.project }}"
+
+          # Temp/Library are disposable Unity caches and caused the EACCES
+          # seen in v10 while upload-artifact tried to stat fsbankcache files.
+          sudo rm -rf \
+            "$PROJECT/Temp" \
+            "$PROJECT/Library" \
+            "$PROJECT/obj" \
+            2>/dev/null || true
+
+          sudo chown -R "$(id -u):$(id -g)" recovered-artifact || true
+          chmod -R u+rwX recovered-artifact || true
+
+      - name: Upload Unity failure project
+        if: steps.unity_build.outcome != 'success' && steps.detect_xcode.outputs.ready != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonic-2006-Unity-iOS-FAIL-v11
+          path: recovered-artifact
+          if-no-files-found: ignore
           compression-level: 0
 
   package_unsigned_ipa:
-    name: Package unsigned IPA
+    name: Package unsigned IPA from Xcode output
     needs: build_unity_ios
-    if: needs.build_unity_ios.outputs.unity_result == 'success'
+    if: needs.build_unity_ios.outputs.xcode_ready == 'true'
     runs-on: macos-latest
     timeout-minutes: 60
 
