@@ -1,4 +1,4 @@
-name: Sonic P-06 Sonic Release iOS - v1
+name: Sonic P-06 Sonic Release iOS - v2
 
 on:
   workflow_dispatch:
@@ -81,67 +81,203 @@ jobs:
           ls -lh work/SonicP06Release.apk
 
       - name: Extract and inspect new Sonic Release
+        id: inspect
+        continue-on-error: true
         run: |
-          set -e
+          set +e
 
-          mkdir -p work/android
+          rm -rf work/android
+          mkdir -p work/android output
+
+          echo "===== APK SIZE ====="
+          ls -lh work/SonicP06Release.apk | tee output/apk-size.txt
+
+          echo "===== EXTRACT APK ====="
           unzip -q work/SonicP06Release.apk -d work/android
+          UNZIP_CODE=$?
+          echo "UNZIP_CODE=$UNZIP_CODE" | tee output/unzip-status.txt
 
-          test -f work/android/assets/bin/Data/globalgamemanagers
-          test -f work/android/assets/bin/Data/level0
+          echo "===== TOP APK TREE ====="
+          find work/android -maxdepth 4 -type f \
+            -printf '%p  %s bytes\n' \
+            | sort \
+            | head -1200 \
+            | tee output/apk-tree.txt || true
+
+          echo "===== LOCATE UNITY DATA ====="
+
+          GGM=$(
+            find work/android -type f -name globalgamemanagers -print \
+              | head -1
+          )
+
+          if [ -n "$GGM" ]; then
+            DATA_DIR="$(dirname "$GGM")"
+          else
+            DATA_DIR=""
+          fi
+
+          echo "GLOBALGAMEMANAGERS=$GGM" | tee output/unity-data-path.txt
+          echo "DATA_DIR=$DATA_DIR" | tee -a output/unity-data-path.txt
+
+          if [ -z "$DATA_DIR" ] || [ ! -d "$DATA_DIR" ]; then
+            echo "UNITY_VERSION=UNKNOWN" | tee output/unity-version.txt
+            echo "SCRIPT_BACKEND=UNKNOWN" | tee output/script-backend.txt
+            echo "COMPATIBLE=false" | tee output/compatibility.txt
+
+            echo "compatible=false" >> "$GITHUB_OUTPUT"
+            echo "unity_version=UNKNOWN" >> "$GITHUB_OUTPUT"
+            echo "script_backend=UNKNOWN" >> "$GITHUB_OUTPUT"
+
+            echo
+            echo "ERROR: Unity Data/globalgamemanagers was not found."
+            echo "The APK layout is different from the old demo."
+            exit 1
+          fi
+
+          echo "===== UNITY DATA FILES ====="
+          find "$DATA_DIR" -maxdepth 2 -type f \
+            -printf '%p  %s bytes\n' \
+            | sort \
+            | head -1600 \
+            | tee output/unity-data-files.txt || true
 
           VERSION=$(
-            strings work/android/assets/bin/Data/globalgamemanagers \
+            strings "$GGM" 2>/dev/null \
               | grep -Eo '20[0-9]{2}\.[0-9]+\.[0-9]+[abfp][0-9]+' \
-              | head -1 || true
+              | head -1
           )
+
+          if [ -z "$VERSION" ]; then
+            # Fallback: search small Unity metadata files, not the huge texture blobs.
+            VERSION=$(
+              find "$DATA_DIR" -maxdepth 1 -type f -size -20M -print0 \
+                | xargs -0 strings 2>/dev/null \
+                | grep -Eo '20[0-9]{2}\.[0-9]+\.[0-9]+[abfp][0-9]+' \
+                | head -1
+            )
+          fi
+
+          [ -n "$VERSION" ] || VERSION="UNKNOWN"
 
           echo "UNITY_VERSION=$VERSION" | tee output/unity-version.txt
 
-          if [ -f work/android/assets/bin/Data/Managed/Assembly-CSharp.dll ]; then
-            echo "SCRIPT_BACKEND=MONO" | tee output/script-backend.txt
-            echo "===== MANAGED CODE ====="
-            ls -lh work/android/assets/bin/Data/Managed/Assembly-CSharp.dll
+          MANAGED_DLL=$(
+            find "$DATA_DIR" -type f -path "*/Managed/Assembly-CSharp.dll" -print \
+              | head -1
+          )
 
-            strings work/android/assets/bin/Data/Managed/Assembly-CSharp.dll \
-              | grep -E 'VirtualJoystick|AButton|BButton|XButton|YButton|StartButton|BackButton|GameInput|XInput|GamePad' \
+          METADATA=$(
+            find work/android -type f -name global-metadata.dat -print \
+              | head -1
+          )
+
+          if [ -n "$MANAGED_DLL" ]; then
+            BACKEND="MONO"
+            echo "SCRIPT_BACKEND=$BACKEND" | tee output/script-backend.txt
+            echo "ASSEMBLY_CSHARP=$MANAGED_DLL" | tee output/managed-path.txt
+
+            echo "===== MANAGED CODE ====="
+            ls -lh "$MANAGED_DLL"
+
+            strings "$MANAGED_DLL" \
+              | grep -E 'VirtualJoystick|AButton|BButton|XButton|YButton|StartButton|BackButton|GameInput|XInput|GamePad|Touch|Joystick' \
               | sort -u \
+              | head -500 \
               | tee output/mobile-input-markers.txt || true
-          elif find work/android -type f -name global-metadata.dat -print -quit | grep -q .; then
-            echo "SCRIPT_BACKEND=IL2CPP" | tee output/script-backend.txt
+
+          elif [ -n "$METADATA" ]; then
+            BACKEND="IL2CPP"
+            echo "SCRIPT_BACKEND=$BACKEND" | tee output/script-backend.txt
+            echo "GLOBAL_METADATA=$METADATA" | tee output/il2cpp-files.txt
+
             find work/android -type f \
               \( -name "global-metadata.dat" -o -name "libil2cpp.so" \) \
-              -print | tee output/il2cpp-files.txt
+              -print \
+              | tee -a output/il2cpp-files.txt || true
           else
-            echo "SCRIPT_BACKEND=UNKNOWN" | tee output/script-backend.txt
+            BACKEND="UNKNOWN"
+            echo "SCRIPT_BACKEND=$BACKEND" | tee output/script-backend.txt
           fi
 
-          echo "===== ANDROID NATIVE LIBS ====="
-          find work/android/lib -maxdepth 2 -type f -print || true
-
-          echo "===== SCENE FILES IN APK ====="
-          find work/android/assets/bin/Data -maxdepth 1 -type f -name 'level*' \
+          echo "===== SCENE FILES ====="
+          find "$DATA_DIR" -maxdepth 1 -type f \
+            \( -name 'level*' -o -name '*.sharedAssets' \) \
             -printf '%f  %s bytes\n' \
             | sort -V \
             | tee output/apk-scenes.txt || true
 
-          # Our proven old-Sonic CI route uses Unity 2018.2.0f2. If this release
-          # uses another editor, stop immediately instead of wasting hours.
+          echo "===== ANDROID NATIVE LIBS ====="
+          find work/android/lib -maxdepth 3 -type f \
+            -printf '%p  %s bytes\n' \
+            | sort \
+            | tee output/android-native-libs.txt || true
+
+          COMPATIBLE=true
+
           if [ "$VERSION" != "2018.2.0f2" ]; then
+            COMPATIBLE=false
+          fi
+
+          if [ "$BACKEND" != "MONO" ]; then
+            COMPATIBLE=false
+          fi
+
+          echo "COMPATIBLE=$COMPATIBLE" | tee output/compatibility.txt
+
+          echo "compatible=$COMPATIBLE" >> "$GITHUB_OUTPUT"
+          echo "unity_version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "script_backend=$BACKEND" >> "$GITHUB_OUTPUT"
+
+          echo
+          echo "=========================================="
+          echo "UNITY_VERSION=$VERSION"
+          echo "SCRIPT_BACKEND=$BACKEND"
+          echo "COMPATIBLE=$COMPATIBLE"
+          echo "DATA_DIR=$DATA_DIR"
+          echo "=========================================="
+
+          if [ "$COMPATIBLE" != "true" ]; then
             echo
-            echo "NEW BUILD DETECTED: Unity $VERSION"
-            echo "This first-run YAML stopped early on purpose."
-            echo "Send the UNITY_VERSION line and we can swap the editor version."
+            echo "This APK is a different Unity build than the old demo."
+            echo "Diagnostics were captured. Do not start the old 2018.2 build yet."
             exit 1
           fi
 
-          if [ ! -f work/android/assets/bin/Data/Managed/Assembly-CSharp.dll ]; then
-            echo
-            echo "This APK is not the same Mono layout as the old demo."
-            echo "Detected backend: $(cut -d= -f2 output/script-backend.txt)"
-            echo "Stopping early so we do not waste a 2-3 hour Unity build."
-            exit 1
-          fi
+          exit 0
+
+      - name: Upload APK inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonic-P06-Sonic-Release-APK-Inspection-v2
+          path: |
+            output/apk-size.txt
+            output/unzip-status.txt
+            output/apk-tree.txt
+            output/unity-data-path.txt
+            output/unity-data-files.txt
+            output/unity-version.txt
+            output/script-backend.txt
+            output/compatibility.txt
+            output/managed-path.txt
+            output/il2cpp-files.txt
+            output/mobile-input-markers.txt
+            output/apk-scenes.txt
+            output/android-native-libs.txt
+          if-no-files-found: ignore
+          compression-level: 0
+
+      - name: Stop if APK inspection is incompatible
+        if: steps.inspect.outcome != 'success'
+        run: |
+          echo "===== APK INSPECTION FAILED / DIFFERENT BUILD ====="
+          cat output/unity-version.txt 2>/dev/null || true
+          cat output/script-backend.txt 2>/dev/null || true
+          cat output/compatibility.txt 2>/dev/null || true
+          echo
+          echo "Open artifact: Sonic-P06-Sonic-Release-APK-Inspection-v2"
+          exit 1
 
       - name: Download AssetRipper 2.0.0
         env:
@@ -1551,7 +1687,7 @@ jobs:
           # Attempt 1 preserves the game assets/settings; attempt 2 only resets GraphicsSettings.
           # The original GraphicsSettings is backed up before the fallback retry.
           cat > "$PROJECT/SONIC-RELEASE-v1-CI-PATCH.txt" <<'EOF'
-          Sonic P-06 Sonic Release iOS v1
+          Sonic P-06 Sonic Release iOS v2
           - use the NEWEST GitHub Release APK, selecting the largest APK asset
           - reuse our proven AssetRipper -> Unity -> Xcode -> unsigned IPA pipeline
           - keep old Unity 2018.2 compiler/Xcode fixes
@@ -2111,7 +2247,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v1
+          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v2
           path: unity-build-diagnostics
           if-no-files-found: ignore
           compression-level: 0
@@ -2138,7 +2274,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-Unity-iOS-FAIL-v1
+          name: Sonic-P06-Sonic-Release-Unity-iOS-FAIL-v2
           path: recovered-artifact
           if-no-files-found: ignore
           compression-level: 0
@@ -2331,16 +2467,16 @@ jobs:
             --sequesterRsrc \
             --keepParent \
             Payload \
-            output/Sonic-P06-Sonic-Release-iOS-KSign-v1.ipa
+            output/Sonic-P06-Sonic-Release-iOS-KSign-v2.ipa
 
-          ls -lh output/Sonic-P06-Sonic-Release-iOS-KSign-v1.ipa
+          ls -lh output/Sonic-P06-Sonic-Release-iOS-KSign-v2.ipa
 
       - name: Upload Sonic iOS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-iOS-KSign-v1
+          name: Sonic-P06-Sonic-Release-iOS-KSign-v2
           path: |
-            output/Sonic-P06-Sonic-Release-iOS-KSign-v1.ipa
+            output/Sonic-P06-Sonic-Release-iOS-KSign-v2.ipa
             xcodebuild.log
           compression-level: 0
 
@@ -2355,7 +2491,7 @@ jobs:
   capture_full_unity_log:
     name: Capture full Unity crash log
     needs: build_unity_ios
-    if: always() && needs.build_unity_ios.outputs.xcode_ready != 'true'
+    if: always() && needs.build_unity_ios.result == 'failure' && needs.build_unity_ios.outputs.xcode_ready != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -2432,7 +2568,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-FULL-Unity-Log-v1
+          name: Sonic-P06-Sonic-Release-FULL-Unity-Log-v2
           path: full-unity-log
           if-no-files-found: warn
           compression-level: 0
