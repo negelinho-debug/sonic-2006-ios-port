@@ -1,4 +1,4 @@
-name: Sonic P-06 Sonic Release iOS - v2
+name: Sonic P-06 Sonic Release iOS - v3
 
 on:
   workflow_dispatch:
@@ -23,13 +23,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Prepare tools
         run: |
           set -e
-          sudo apt-get update
-          sudo apt-get install -y unzip curl jq xz-utils
+
+          # GitHub's ubuntu runner already ships with the tools we need.
+          # Do NOT run apt-get update unless something is actually missing:
+          # a broken third-party apt index was killing the job before APK download.
           rm -rf work tools recovered output release-files
           mkdir -p work tools recovered output release-files
+
+          missing_pkgs=""
+
+          command -v unzip >/dev/null 2>&1 || missing_pkgs="$missing_pkgs unzip"
+          command -v curl  >/dev/null 2>&1 || missing_pkgs="$missing_pkgs curl"
+          command -v jq    >/dev/null 2>&1 || missing_pkgs="$missing_pkgs jq"
+          command -v xz    >/dev/null 2>&1 || missing_pkgs="$missing_pkgs xz-utils"
+          command -v strings >/dev/null 2>&1 || missing_pkgs="$missing_pkgs binutils"
+
+          if [ -n "$missing_pkgs" ]; then
+            echo "Missing packages:$missing_pkgs"
+            echo "Trying apt only because something is actually missing..."
+
+            # Retry transient mirrors. A failed update alone is not fatal;
+            # package installation can still use the runner's existing indexes.
+            sudo apt-get update               -o Acquire::Retries=4               -o Acquire::http::Timeout=30               -o Acquire::https::Timeout=30               || echo "WARNING: apt-get update failed; trying cached indexes."
+
+            sudo apt-get install -y --no-install-recommends $missing_pkgs
+          fi
+
+          echo "===== TOOL CHECK ====="
+          for c in unzip curl jq xz strings gh git python3; do
+            printf "%-10s " "$c"
+            command -v "$c" || {
+              echo "ERROR: required tool missing: $c"
+              exit 1
+            }
+          done
 
       - name: Download newest Sonic Release APK
         env:
@@ -250,7 +280,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-APK-Inspection-v2
+          name: Sonic-P06-Sonic-Release-APK-Inspection-v3
           path: |
             output/apk-size.txt
             output/unzip-status.txt
@@ -276,7 +306,7 @@ jobs:
           cat output/script-backend.txt 2>/dev/null || true
           cat output/compatibility.txt 2>/dev/null || true
           echo
-          echo "Open artifact: Sonic-P06-Sonic-Release-APK-Inspection-v2"
+          echo "Open artifact: Sonic-P06-Sonic-Release-APK-Inspection-v3"
           exit 1
 
       - name: Download AssetRipper 2.0.0
@@ -1687,7 +1717,7 @@ jobs:
           # Attempt 1 preserves the game assets/settings; attempt 2 only resets GraphicsSettings.
           # The original GraphicsSettings is backed up before the fallback retry.
           cat > "$PROJECT/SONIC-RELEASE-v1-CI-PATCH.txt" <<'EOF'
-          Sonic P-06 Sonic Release iOS v2
+          Sonic P-06 Sonic Release iOS v3
           - use the NEWEST GitHub Release APK, selecting the largest APK asset
           - reuse our proven AssetRipper -> Unity -> Xcode -> unsigned IPA pipeline
           - keep old Unity 2018.2 compiler/Xcode fixes
@@ -2247,7 +2277,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v2
+          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v3
           path: unity-build-diagnostics
           if-no-files-found: ignore
           compression-level: 0
@@ -2274,7 +2304,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-Unity-iOS-FAIL-v2
+          name: Sonic-P06-Sonic-Release-Unity-iOS-FAIL-v3
           path: recovered-artifact
           if-no-files-found: ignore
           compression-level: 0
@@ -2467,16 +2497,16 @@ jobs:
             --sequesterRsrc \
             --keepParent \
             Payload \
-            output/Sonic-P06-Sonic-Release-iOS-KSign-v2.ipa
+            output/Sonic-P06-Sonic-Release-iOS-KSign-v3.ipa
 
-          ls -lh output/Sonic-P06-Sonic-Release-iOS-KSign-v2.ipa
+          ls -lh output/Sonic-P06-Sonic-Release-iOS-KSign-v3.ipa
 
       - name: Upload Sonic iOS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-iOS-KSign-v2
+          name: Sonic-P06-Sonic-Release-iOS-KSign-v3
           path: |
-            output/Sonic-P06-Sonic-Release-iOS-KSign-v2.ipa
+            output/Sonic-P06-Sonic-Release-iOS-KSign-v3.ipa
             xcodebuild.log
           compression-level: 0
 
@@ -2568,7 +2598,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-FULL-Unity-Log-v2
+          name: Sonic-P06-Sonic-Release-FULL-Unity-Log-v3
           path: full-unity-log
           if-no-files-found: warn
           compression-level: 0
