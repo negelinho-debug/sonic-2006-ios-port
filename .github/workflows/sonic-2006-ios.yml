@@ -1,4 +1,4 @@
-name: Sonic 2006 iOS - NO PC v21
+name: Sonic 2006 iOS - NO PC v22
 
 on:
   workflow_dispatch:
@@ -432,9 +432,9 @@ jobs:
             | head -250 \
             | tee output/touch-csharp-references.txt || true
 
-          echo "===== V21 FIX: IOS TOUCH / BUTTON INPUT ====="
+          echo "===== V22 FIX: IOS TOUCH / BUTTON INPUT ====="
           mkdir -p output
-          : > output/v21-input-patched-files.txt
+          : > output/v22-input-patched-files.txt
 
           # 1) Re-enable mobile code that was Android-gated in recovered sources.
           # 2) Route Unity Input button/key/axis reads through an iOS touch bridge.
@@ -445,7 +445,7 @@ jobs:
 
           project = Path(os.environ["PROJECT"])
           root = project / "Assets" / "Scripts" / "Assembly-CSharp"
-          report = Path("output/v21-input-patched-files.txt")
+          report = Path("output/v22-input-patched-files.txt")
 
           if not root.exists():
               root = project / "Assets"
@@ -559,6 +559,8 @@ jobs:
           {
               internal static bool ADown, AHeld, AUp;
               internal static bool BDown, BHeld, BUp;
+              internal static bool XDown, XHeld, XUp;
+              internal static bool YDown, YHeld, YUp;
               internal static bool StartDown, StartHeld, StartUp;
               internal static Vector2 LeftStick;
 
@@ -598,15 +600,28 @@ jobs:
                          n == "joystickbutton1";
               }
 
+              private static bool IsX(string n)
+              {
+                  return n == "x" || n == "attack" || n == "action" ||
+                         n == "fire3" || n == "button2" ||
+                         n == "joystickbutton2";
+              }
+
+              private static bool IsY(string n)
+              {
+                  return n == "y" || n == "special" || n == "secondary" ||
+                         n == "button3" || n == "joystickbutton3";
+              }
+
               private static bool IsStart(string n)
               {
                   return n == "start" || n == "pause" || n == "menu" ||
-                         n == "startbutton";
+                         n == "startbutton" || n == "joystickbutton7";
               }
 
               public static bool AnyKeyDown
               {
-                  get { return Input.anyKeyDown || ADown || BDown || StartDown; }
+                  get { return Input.anyKeyDown || ADown || BDown || XDown || YDown || StartDown; }
               }
 
               public static bool GetButtonDown(string name)
@@ -618,6 +633,8 @@ jobs:
                   string n = Norm(name);
                   if (IsA(n)) return ADown;
                   if (IsB(n)) return BDown;
+                  if (IsX(n)) return XDown;
+                  if (IsY(n)) return YDown;
                   if (IsStart(n)) return StartDown;
                   return false;
               }
@@ -631,6 +648,8 @@ jobs:
                   string n = Norm(name);
                   if (IsA(n)) return AHeld;
                   if (IsB(n)) return BHeld;
+                  if (IsX(n)) return XHeld;
+                  if (IsY(n)) return YHeld;
                   if (IsStart(n)) return StartHeld;
                   return false;
               }
@@ -644,6 +663,8 @@ jobs:
                   string n = Norm(name);
                   if (IsA(n)) return AUp;
                   if (IsB(n)) return BUp;
+                  if (IsX(n)) return XUp;
+                  if (IsY(n)) return YUp;
                   if (IsStart(n)) return StartUp;
                   return false;
               }
@@ -653,7 +674,9 @@ jobs:
                   if (Input.GetKeyDown(key)) return true;
                   if (key == KeyCode.Space || key == KeyCode.JoystickButton0) return ADown;
                   if (key == KeyCode.Escape || key == KeyCode.JoystickButton1) return BDown;
-                  if (key == KeyCode.Return || key == KeyCode.KeypadEnter) return StartDown;
+                  if (key == KeyCode.JoystickButton2) return XDown;
+                  if (key == KeyCode.JoystickButton3) return YDown;
+                  if (key == KeyCode.Return || key == KeyCode.KeypadEnter || key == KeyCode.JoystickButton7) return StartDown;
                   return false;
               }
 
@@ -662,7 +685,9 @@ jobs:
                   if (Input.GetKey(key)) return true;
                   if (key == KeyCode.Space || key == KeyCode.JoystickButton0) return AHeld;
                   if (key == KeyCode.Escape || key == KeyCode.JoystickButton1) return BHeld;
-                  if (key == KeyCode.Return || key == KeyCode.KeypadEnter) return StartHeld;
+                  if (key == KeyCode.JoystickButton2) return XHeld;
+                  if (key == KeyCode.JoystickButton3) return YHeld;
+                  if (key == KeyCode.Return || key == KeyCode.KeypadEnter || key == KeyCode.JoystickButton7) return StartHeld;
                   return false;
               }
 
@@ -671,7 +696,9 @@ jobs:
                   if (Input.GetKeyUp(key)) return true;
                   if (key == KeyCode.Space || key == KeyCode.JoystickButton0) return AUp;
                   if (key == KeyCode.Escape || key == KeyCode.JoystickButton1) return BUp;
-                  if (key == KeyCode.Return || key == KeyCode.KeypadEnter) return StartUp;
+                  if (key == KeyCode.JoystickButton2) return XUp;
+                  if (key == KeyCode.JoystickButton3) return YUp;
+                  if (key == KeyCode.Return || key == KeyCode.KeypadEnter || key == KeyCode.JoystickButton7) return StartUp;
                   return false;
               }
 
@@ -712,6 +739,8 @@ jobs:
               private int stickFinger = -1;
               private Vector2 stickOrigin;
               private float nextVisualFix;
+              private float suppressStartUntil;
+              private GUIStyle touchLabelStyle;
 
               private void Awake()
               {
@@ -729,6 +758,15 @@ jobs:
 
               private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
               {
+                  IOSInputBridge.ADown = IOSInputBridge.AHeld = IOSInputBridge.AUp = false;
+                  IOSInputBridge.BDown = IOSInputBridge.BHeld = IOSInputBridge.BUp = false;
+                  IOSInputBridge.XDown = IOSInputBridge.XHeld = IOSInputBridge.XUp = false;
+                  IOSInputBridge.YDown = IOSInputBridge.YHeld = IOSInputBridge.YUp = false;
+                  IOSInputBridge.StartDown = IOSInputBridge.StartHeld = IOSInputBridge.StartUp = false;
+                  IOSInputBridge.LeftStick = Vector2.zero;
+                  stickFinger = -1;
+                  suppressStartUntil = Time.unscaledTime + 0.65f;
+
                   EnsureEventSystem();
                   FixBrokenTitleTextures();
               }
@@ -739,11 +777,17 @@ jobs:
                   IOSInputBridge.AUp = false;
                   IOSInputBridge.BDown = false;
                   IOSInputBridge.BUp = false;
+                  IOSInputBridge.XDown = false;
+                  IOSInputBridge.XUp = false;
+                  IOSInputBridge.YDown = false;
+                  IOSInputBridge.YUp = false;
                   IOSInputBridge.StartDown = false;
                   IOSInputBridge.StartUp = false;
 
                   bool aHeld = false;
                   bool bHeld = false;
+                  bool xHeld = false;
+                  bool yHeld = false;
                   bool startHeld = false;
                   Vector2 stick = Vector2.zero;
 
@@ -758,16 +802,20 @@ jobs:
 
                       Vector2 aCenter = new Vector2(w * 0.73f, h * 0.18f);
                       Vector2 bCenter = new Vector2(w * 0.79f, h * 0.36f);
+                      Vector2 xCenter = new Vector2(w * 0.66f, h * 0.29f);
+                      Vector2 yCenter = new Vector2(w * 0.72f, h * 0.47f);
+                      Vector2 startCenter = new Vector2(w * 0.92f, h * 0.90f);
 
-                      bool inA = Vector2.Distance(p, aCenter) < unit * 0.15f;
-                      bool inB = Vector2.Distance(p, bCenter) < unit * 0.15f;
+                      bool inA = Vector2.Distance(p, aCenter) < unit * 0.13f;
+                      bool inB = Vector2.Distance(p, bCenter) < unit * 0.13f;
+                      bool inX = Vector2.Distance(p, xCenter) < unit * 0.12f;
+                      bool inY = Vector2.Distance(p, yCenter) < unit * 0.12f;
+                      bool inPauseButton = Vector2.Distance(p, startCenter) < unit * 0.10f;
 
-                      // The title screen says PRESS START. Tapping the center
-                      // of that text supplies Start without making A pause the
-                      // game during normal gameplay.
-                      bool inStart =
+                      bool inTitleStart =
                           p.x > w * 0.36f && p.x < w * 0.64f &&
                           p.y > h * 0.34f && p.y < h * 0.66f;
+                      bool inStart = inPauseButton || inTitleStart;
 
                       if (inA)
                       {
@@ -783,10 +831,29 @@ jobs:
                           if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
                               IOSInputBridge.BUp = true;
                       }
+                      else if (inX)
+                      {
+                          xHeld = t.phase != TouchPhase.Ended && t.phase != TouchPhase.Canceled;
+                          if (t.phase == TouchPhase.Began) IOSInputBridge.XDown = true;
+                          if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
+                              IOSInputBridge.XUp = true;
+                      }
+                      else if (inY)
+                      {
+                          yHeld = t.phase != TouchPhase.Ended && t.phase != TouchPhase.Canceled;
+                          if (t.phase == TouchPhase.Began) IOSInputBridge.YDown = true;
+                          if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
+                              IOSInputBridge.YUp = true;
+                      }
                       else if (inStart)
                       {
-                          startHeld = t.phase != TouchPhase.Ended && t.phase != TouchPhase.Canceled;
-                          if (t.phase == TouchPhase.Began) IOSInputBridge.StartDown = true;
+                          startHeld = false;
+                          if (Time.unscaledTime >= suppressStartUntil &&
+                              t.phase == TouchPhase.Began)
+                          {
+                              IOSInputBridge.StartDown = true;
+                              suppressStartUntil = Time.unscaledTime + 0.40f;
+                          }
                           if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
                               IOSInputBridge.StartUp = true;
                       }
@@ -817,6 +884,8 @@ jobs:
 
                   IOSInputBridge.AHeld = aHeld;
                   IOSInputBridge.BHeld = bHeld;
+                  IOSInputBridge.XHeld = xHeld;
+                  IOSInputBridge.YHeld = yHeld;
                   IOSInputBridge.StartHeld = startHeld;
                   IOSInputBridge.LeftStick = stick;
 
@@ -826,6 +895,42 @@ jobs:
                       EnsureEventSystem();
                       FixBrokenTitleTextures();
                   }
+              }
+
+              private void OnGUI()
+              {
+                  if (touchLabelStyle == null)
+                  {
+                      touchLabelStyle = new GUIStyle(GUI.skin.label);
+                      touchLabelStyle.alignment = TextAnchor.MiddleCenter;
+                      touchLabelStyle.fontStyle = FontStyle.Bold;
+                      touchLabelStyle.fontSize = Mathf.RoundToInt(Mathf.Clamp(Screen.height * 0.045f, 18f, 34f));
+                      touchLabelStyle.normal.textColor = Color.white;
+                  }
+
+                  float w = Screen.width;
+                  float h = Screen.height;
+                  float d = Mathf.Min(w, h) * 0.105f;
+
+                  DrawTouchBadge(new Vector2(w * 0.66f, h * 0.71f), d, "X",
+                      new Color(0.15f, 0.48f, 0.90f, 0.82f));
+                  DrawTouchBadge(new Vector2(w * 0.72f, h * 0.53f), d, "Y",
+                      new Color(0.95f, 0.76f, 0.10f, 0.84f));
+                  DrawTouchBadge(new Vector2(w * 0.92f, h * 0.10f), d * 0.82f, "II",
+                      new Color(0.10f, 0.10f, 0.12f, 0.76f));
+              }
+
+              private void DrawTouchBadge(Vector2 center, float diameter, string label, Color color)
+              {
+                  Rect r = new Rect(center.x - diameter * 0.5f,
+                                    center.y - diameter * 0.5f,
+                                    diameter, diameter);
+                  Color old = GUI.color;
+                  GUI.color = color;
+                  GUI.Box(r, "");
+                  GUI.color = Color.white;
+                  GUI.Label(r, label, touchLabelStyle);
+                  GUI.color = old;
               }
 
               private static void EnsureEventSystem()
@@ -912,12 +1017,12 @@ jobs:
           }
           CS
 
-          echo "===== V21 INPUT PATCH REPORT ====="
-          wc -l output/v21-input-patched-files.txt || true
-          head -120 output/v21-input-patched-files.txt || true
+          echo "===== V22 INPUT PATCH REPORT ====="
+          wc -l output/v22-input-patched-files.txt || true
+          head -120 output/v22-input-patched-files.txt || true
 
-          echo "===== V21 FIX: CLAMP MENU / LOGO / LOADING TEXTURES ====="
-          : > output/v21-clamped-ui-textures.txt
+          echo "===== V22 FIX: CLAMP MENU / LOGO / LOADING TEXTURES ====="
+          : > output/v22-clamped-ui-textures.txt
 
           # The current iOS build shows the SONIC title texture tiled across
           # the whole screen. AssetRipper can restore some UI textures with
@@ -930,7 +1035,7 @@ jobs:
               *logo*|*title*|*loading*|*control*|*menu*|*splash*|*background*|*/bg_*|*_bg.*|*sega*)
                 if grep -qE '^[[:space:]]*wrapMode:[[:space:]]*0([[:space:]]|$)' "$META"; then
                   sed -Ei 's/^([[:space:]]*wrapMode:)[[:space:]]*0([[:space:]]*)$/\1 1\2/' "$META"
-                  echo "$IMG" >> output/v21-clamped-ui-textures.txt
+                  echo "$IMG" >> output/v22-clamped-ui-textures.txt
                 fi
 
                 # Some Unity 2018 metas use per-axis wrap fields.
@@ -949,7 +1054,7 @@ jobs:
           )
 
           echo "Clamped UI textures:"
-          cat output/v21-clamped-ui-textures.txt || true
+          cat output/v22-clamped-ui-textures.txt || true
 
       - name: Create recovery report
         run: |
@@ -994,8 +1099,8 @@ jobs:
             output/touch-csharp-references.txt
             output/removed-android-plugins.txt
             output/removed-duplicate-spatialtracking.txt
-            output/v21-clamped-ui-textures.txt
-            output/v21-input-patched-files.txt
+            output/v22-clamped-ui-textures.txt
+            output/v22-input-patched-files.txt
           compression-level: 0
 
   build_unity_ios:
@@ -1081,7 +1186,7 @@ jobs:
           set -e
 
           PROJECT="${{ steps.locate.outputs.project }}"
-          echo "===== V21 TOUCH INPUT FIX ====="
+          echo "===== V22 FINAL TOUCH + BUTTON FIX ====="
 
           # Start the first attempt from a clean import. The second attempt below
           # intentionally keeps the freshly generated Library cache, because v11
@@ -1092,14 +1197,15 @@ jobs:
 
           # Attempt 1 preserves the game assets/settings; attempt 2 only resets GraphicsSettings.
           # The original GraphicsSettings is backed up before the fallback retry.
-          cat > "$PROJECT/V21-CI-PATCH.txt" <<'EOF'
-          Sonic 2006 iOS v21 CI patch
-          - keep all working Unity/Xcode/icon fixes
-          - re-enable recovered Android mobile-input paths on iOS
-          - route classic Input.GetButton/GetKey/GetAxis calls through an iOS touch bridge
-          - repair/enable EventSystem automatically on every scene
-          - add working A/B/Start touch zones and left movement stick fallback
-          - runtime-fix tiled title/menu textures as well as importer wrap mode
+          cat > "$PROJECT/V22-CI-PATCH.txt" <<'EOF'
+          Sonic 2006 iOS v22 CI patch
+          - keep all working Unity/Xcode/icon/UI fixes
+          - A/B touch + left movement stick fallback
+          - add visible X and Y touch buttons with Xbox-style mappings
+          - add a separate top-right Start/Pause button
+          - make PRESS START pulse-only so it cannot instantly open Pause after loading
+          - reset all touch states after each scene load
+          - keep runtime/importer fixes for tiled title/menu textures
           EOF
 
       - name: Setup Node 22 for Unity CLI
@@ -1471,7 +1577,7 @@ jobs:
           set +e
 
           PROJECT="${{ steps.locate.outputs.project }}"
-          echo "===== V21 WARM RETRY ====="
+          echo "===== V22 WARM RETRY ====="
           echo "Attempt 1 used legacy GL Core + single-threaded graphics."
           echo "For attempt 2 we also regenerate GraphicsSettings.asset."
 
@@ -1520,7 +1626,7 @@ jobs:
         run: |
           set +e
 
-          echo "===== V21 FINAL XCODE DETECTION ====="
+          echo "===== V22 FINAL XCODE DETECTION ====="
           echo "ATTEMPT1=${{ steps.unity_build_1.outcome }} / engine=${{ steps.unity_build_1.outputs.engineExitCode }}"
           echo "ATTEMPT2=${{ steps.unity_build_2.outcome }} / engine=${{ steps.unity_build_2.outputs.engineExitCode }}"
 
@@ -1564,7 +1670,7 @@ jobs:
           mkdir -p unity-build-diagnostics
 
           {
-            echo "V21=true"
+            echo "V22=true"
             echo "ATTEMPT1_OUTCOME=${{ steps.unity_build_1.outcome }}"
             echo "ATTEMPT1_ENGINE_EXIT=${{ steps.unity_build_1.outputs.engineExitCode }}"
             echo "ATTEMPT2_OUTCOME=${{ steps.unity_build_2.outcome }}"
@@ -1653,7 +1759,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-Unity-Build-Diagnostics-v21
+          name: Sonic-2006-Unity-Build-Diagnostics-v22
           path: unity-build-diagnostics
           if-no-files-found: ignore
           compression-level: 0
@@ -1680,7 +1786,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-Unity-iOS-FAIL-v21
+          name: Sonic-2006-Unity-iOS-FAIL-v22
           path: recovered-artifact
           if-no-files-found: ignore
           compression-level: 0
@@ -1873,16 +1979,16 @@ jobs:
             --sequesterRsrc \
             --keepParent \
             Payload \
-            output/Sonic-2006-iOS-KSign-v21.ipa
+            output/Sonic-2006-iOS-KSign-v22.ipa
 
-          ls -lh output/Sonic-2006-iOS-KSign-v21.ipa
+          ls -lh output/Sonic-2006-iOS-KSign-v22.ipa
 
       - name: Upload Sonic iOS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-iOS-KSign-v21
+          name: Sonic-2006-iOS-KSign-v22
           path: |
-            output/Sonic-2006-iOS-KSign-v21.ipa
+            output/Sonic-2006-iOS-KSign-v22.ipa
             xcodebuild.log
           compression-level: 0
 
@@ -1974,7 +2080,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-FULL-Unity-Log-v21
+          name: Sonic-2006-FULL-Unity-Log-v22
           path: full-unity-log
           if-no-files-found: warn
           compression-level: 0
