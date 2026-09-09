@@ -1,4 +1,4 @@
-name: Sonic 2006 iOS - NO PC v20
+name: Sonic 2006 iOS - NO PC v21
 
 on:
   workflow_dispatch:
@@ -432,8 +432,492 @@ jobs:
             | head -250 \
             | tee output/touch-csharp-references.txt || true
 
-          echo "===== V20 FIX: CLAMP MENU / LOGO / LOADING TEXTURES ====="
-          : > output/v20-clamped-ui-textures.txt
+          echo "===== V21 FIX: IOS TOUCH / BUTTON INPUT ====="
+          mkdir -p output
+          : > output/v21-input-patched-files.txt
+
+          # 1) Re-enable mobile code that was Android-gated in recovered sources.
+          # 2) Route Unity Input button/key/axis reads through an iOS touch bridge.
+          PROJECT="$PROJECT" python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          project = Path(os.environ["PROJECT"])
+          root = project / "Assets" / "Scripts" / "Assembly-CSharp"
+          report = Path("output/v21-input-patched-files.txt")
+
+          if not root.exists():
+              root = project / "Assets"
+
+          markers = re.compile(
+              r"VirtualJoystick|Touch|AButton|BButton|XButton|YButton|"
+              r"StartButton|BackButton|GameInput|Input\.GetButton|Input\.GetAxis|"
+              r"Input\.GetKey|RuntimePlatform\.Android|UNITY_ANDROID",
+              re.I,
+          )
+
+          api_calls = [
+              "GetButtonDown", "GetButtonUp", "GetButton",
+              "GetAxisRaw", "GetAxis",
+              "GetKeyDown", "GetKeyUp", "GetKey",
+          ]
+
+          changed = []
+
+          for path in root.rglob("*.cs"):
+              if path.name in {"IOSInputBridge.cs"}:
+                  continue
+
+              try:
+                  original = path.read_text(encoding="utf-8", errors="ignore")
+              except Exception:
+                  continue
+
+              s = original
+
+              # Route classic Unity input through the bridge. The bridge always
+              # delegates to the original Unity Input first, so keyboard/gamepad
+              # behaviour remains available.
+              for name in api_calls:
+                  s = re.sub(
+                      rf"UnityEngine\.Input\.{name}\s*\(",
+                      f"IOSInputBridge.{name}(",
+                      s,
+                  )
+                  s = re.sub(
+                      rf"(?<![\w.])Input\.{name}\s*\(",
+                      f"IOSInputBridge.{name}(",
+                      s,
+                  )
+
+              s = re.sub(
+                  r"(?<![\w.])Input\.anyKeyDown\b",
+                  "IOSInputBridge.AnyKeyDown",
+                  s,
+              )
+              s = re.sub(
+                  r"UnityEngine\.Input\.anyKeyDown\b",
+                  "IOSInputBridge.AnyKeyDown",
+                  s,
+              )
+
+              if markers.search(original):
+                  # The original mobile conversion contains Android-only
+                  # platform gates. Treat iPhonePlayer as the same mobile path.
+                  s = re.sub(
+                      r"Application\.platform\s*==\s*RuntimePlatform\.Android",
+                      "(Application.platform == RuntimePlatform.Android || "
+                      "Application.platform == RuntimePlatform.IPhonePlayer)",
+                      s,
+                  )
+                  s = re.sub(
+                      r"RuntimePlatform\.Android\s*==\s*Application\.platform",
+                      "(Application.platform == RuntimePlatform.Android || "
+                      "Application.platform == RuntimePlatform.IPhonePlayer)",
+                      s,
+                  )
+                  s = re.sub(
+                      r"Application\.platform\s*!=\s*RuntimePlatform\.Android",
+                      "(Application.platform != RuntimePlatform.Android && "
+                      "Application.platform != RuntimePlatform.IPhonePlayer)",
+                      s,
+                  )
+
+                  # Only widen UNITY_ANDROID blocks that do not use AndroidJava;
+                  # Android Java APIs themselves cannot exist on iOS.
+                  if "AndroidJava" not in original:
+                      s = re.sub(
+                          r"(?m)^(\s*)#if\s+UNITY_ANDROID\s*$",
+                          r"\1#if UNITY_ANDROID || UNITY_IOS",
+                          s,
+                      )
+                      s = re.sub(
+                          r"(?m)^(\s*)#elif\s+UNITY_ANDROID\s*$",
+                          r"\1#elif UNITY_ANDROID || UNITY_IOS",
+                          s,
+                      )
+
+              if s != original:
+                  path.write_text(s, encoding="utf-8")
+                  changed.append(str(path))
+
+          report.write_text("\n".join(changed) + ("\n" if changed else ""))
+          print("Patched input files:", len(changed))
+          for p in changed[:120]:
+              print(p)
+          PY
+
+          cat > "$PROJECT/Assets/Scripts/Assembly-CSharp/IOSInputBridge.cs" <<'CS'
+          using System;
+          using UnityEngine;
+          using UnityEngine.EventSystems;
+          using UnityEngine.SceneManagement;
+          using UnityEngine.UI;
+
+          public static class IOSInputBridge
+          {
+              internal static bool ADown, AHeld, AUp;
+              internal static bool BDown, BHeld, BUp;
+              internal static bool StartDown, StartHeld, StartUp;
+              internal static Vector2 LeftStick;
+
+              [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
+              private static void Boot()
+              {
+                  Input.simulateMouseWithTouches = true;
+
+                  if (UnityEngine.Object.FindObjectOfType<IOSInputBridgeDriver>() == null)
+                  {
+                      GameObject go = new GameObject("IOSInputBridge");
+                      UnityEngine.Object.DontDestroyOnLoad(go);
+                      go.AddComponent<IOSInputBridgeDriver>();
+                  }
+              }
+
+              private static string Norm(string name)
+              {
+                  if (String.IsNullOrEmpty(name)) return "";
+                  return name.ToLowerInvariant()
+                      .Replace(" ", "")
+                      .Replace("_", "")
+                      .Replace("-", "");
+              }
+
+              private static bool IsA(string n)
+              {
+                  return n == "a" || n == "jump" || n == "accept" ||
+                         n == "submit" || n == "fire1" || n == "button0" ||
+                         n == "cross" || n == "joystickbutton0";
+              }
+
+              private static bool IsB(string n)
+              {
+                  return n == "b" || n == "cancel" || n == "back" ||
+                         n == "fire2" || n == "button1" || n == "circle" ||
+                         n == "joystickbutton1";
+              }
+
+              private static bool IsStart(string n)
+              {
+                  return n == "start" || n == "pause" || n == "menu" ||
+                         n == "startbutton";
+              }
+
+              public static bool AnyKeyDown
+              {
+                  get { return Input.anyKeyDown || ADown || BDown || StartDown; }
+              }
+
+              public static bool GetButtonDown(string name)
+              {
+                  bool native = false;
+                  try { native = Input.GetButtonDown(name); } catch {}
+                  if (native) return true;
+
+                  string n = Norm(name);
+                  if (IsA(n)) return ADown;
+                  if (IsB(n)) return BDown;
+                  if (IsStart(n)) return StartDown;
+                  return false;
+              }
+
+              public static bool GetButton(string name)
+              {
+                  bool native = false;
+                  try { native = Input.GetButton(name); } catch {}
+                  if (native) return true;
+
+                  string n = Norm(name);
+                  if (IsA(n)) return AHeld;
+                  if (IsB(n)) return BHeld;
+                  if (IsStart(n)) return StartHeld;
+                  return false;
+              }
+
+              public static bool GetButtonUp(string name)
+              {
+                  bool native = false;
+                  try { native = Input.GetButtonUp(name); } catch {}
+                  if (native) return true;
+
+                  string n = Norm(name);
+                  if (IsA(n)) return AUp;
+                  if (IsB(n)) return BUp;
+                  if (IsStart(n)) return StartUp;
+                  return false;
+              }
+
+              public static bool GetKeyDown(KeyCode key)
+              {
+                  if (Input.GetKeyDown(key)) return true;
+                  if (key == KeyCode.Space || key == KeyCode.JoystickButton0) return ADown;
+                  if (key == KeyCode.Escape || key == KeyCode.JoystickButton1) return BDown;
+                  if (key == KeyCode.Return || key == KeyCode.KeypadEnter) return StartDown;
+                  return false;
+              }
+
+              public static bool GetKey(KeyCode key)
+              {
+                  if (Input.GetKey(key)) return true;
+                  if (key == KeyCode.Space || key == KeyCode.JoystickButton0) return AHeld;
+                  if (key == KeyCode.Escape || key == KeyCode.JoystickButton1) return BHeld;
+                  if (key == KeyCode.Return || key == KeyCode.KeypadEnter) return StartHeld;
+                  return false;
+              }
+
+              public static bool GetKeyUp(KeyCode key)
+              {
+                  if (Input.GetKeyUp(key)) return true;
+                  if (key == KeyCode.Space || key == KeyCode.JoystickButton0) return AUp;
+                  if (key == KeyCode.Escape || key == KeyCode.JoystickButton1) return BUp;
+                  if (key == KeyCode.Return || key == KeyCode.KeypadEnter) return StartUp;
+                  return false;
+              }
+
+              public static float GetAxis(string name)
+              {
+                  float native = 0f;
+                  try { native = Input.GetAxis(name); } catch {}
+                  if (Mathf.Abs(native) > 0.01f) return native;
+
+                  string n = Norm(name);
+                  if (n == "horizontal" || n == "leftstickx" || n == "movehorizontal")
+                      return LeftStick.x;
+                  if (n == "vertical" || n == "leftsticky" || n == "movevertical")
+                      return LeftStick.y;
+
+                  return native;
+              }
+
+              public static float GetAxisRaw(string name)
+              {
+                  float native = 0f;
+                  try { native = Input.GetAxisRaw(name); } catch {}
+                  if (Mathf.Abs(native) > 0.01f) return native;
+
+                  string n = Norm(name);
+                  if (n == "horizontal" || n == "leftstickx" || n == "movehorizontal")
+                      return LeftStick.x;
+                  if (n == "vertical" || n == "leftsticky" || n == "movevertical")
+                      return LeftStick.y;
+
+                  return native;
+              }
+          }
+
+          [DefaultExecutionOrder(-10000)]
+          public sealed class IOSInputBridgeDriver : MonoBehaviour
+          {
+              private int stickFinger = -1;
+              private Vector2 stickOrigin;
+              private float nextVisualFix;
+
+              private void Awake()
+              {
+                  DontDestroyOnLoad(gameObject);
+                  Input.simulateMouseWithTouches = true;
+                  EnsureEventSystem();
+                  FixBrokenTitleTextures();
+                  SceneManager.sceneLoaded += OnSceneLoaded;
+              }
+
+              private void OnDestroy()
+              {
+                  SceneManager.sceneLoaded -= OnSceneLoaded;
+              }
+
+              private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+              {
+                  EnsureEventSystem();
+                  FixBrokenTitleTextures();
+              }
+
+              private void Update()
+              {
+                  IOSInputBridge.ADown = false;
+                  IOSInputBridge.AUp = false;
+                  IOSInputBridge.BDown = false;
+                  IOSInputBridge.BUp = false;
+                  IOSInputBridge.StartDown = false;
+                  IOSInputBridge.StartUp = false;
+
+                  bool aHeld = false;
+                  bool bHeld = false;
+                  bool startHeld = false;
+                  Vector2 stick = Vector2.zero;
+
+                  float w = Mathf.Max(1f, Screen.width);
+                  float h = Mathf.Max(1f, Screen.height);
+                  float unit = Mathf.Min(w, h);
+
+                  for (int i = 0; i < Input.touchCount; i++)
+                  {
+                      Touch t = Input.GetTouch(i);
+                      Vector2 p = t.position;
+
+                      Vector2 aCenter = new Vector2(w * 0.73f, h * 0.18f);
+                      Vector2 bCenter = new Vector2(w * 0.79f, h * 0.36f);
+
+                      bool inA = Vector2.Distance(p, aCenter) < unit * 0.15f;
+                      bool inB = Vector2.Distance(p, bCenter) < unit * 0.15f;
+
+                      // The title screen says PRESS START. Tapping the center
+                      // of that text supplies Start without making A pause the
+                      // game during normal gameplay.
+                      bool inStart =
+                          p.x > w * 0.36f && p.x < w * 0.64f &&
+                          p.y > h * 0.34f && p.y < h * 0.66f;
+
+                      if (inA)
+                      {
+                          aHeld = t.phase != TouchPhase.Ended && t.phase != TouchPhase.Canceled;
+                          if (t.phase == TouchPhase.Began) IOSInputBridge.ADown = true;
+                          if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
+                              IOSInputBridge.AUp = true;
+                      }
+                      else if (inB)
+                      {
+                          bHeld = t.phase != TouchPhase.Ended && t.phase != TouchPhase.Canceled;
+                          if (t.phase == TouchPhase.Began) IOSInputBridge.BDown = true;
+                          if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
+                              IOSInputBridge.BUp = true;
+                      }
+                      else if (inStart)
+                      {
+                          startHeld = t.phase != TouchPhase.Ended && t.phase != TouchPhase.Canceled;
+                          if (t.phase == TouchPhase.Began) IOSInputBridge.StartDown = true;
+                          if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
+                              IOSInputBridge.StartUp = true;
+                      }
+
+                      // Left half / lower half = virtual movement stick.
+                      if (p.x < w * 0.46f && p.y < h * 0.58f)
+                      {
+                          if (stickFinger == -1 && t.phase == TouchPhase.Began)
+                          {
+                              stickFinger = t.fingerId;
+                              stickOrigin = p;
+                          }
+
+                          if (t.fingerId == stickFinger)
+                          {
+                              if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
+                              {
+                                  stickFinger = -1;
+                              }
+                              else
+                              {
+                                  float radius = unit * 0.16f;
+                                  stick = Vector2.ClampMagnitude((p - stickOrigin) / radius, 1f);
+                              }
+                          }
+                      }
+                  }
+
+                  IOSInputBridge.AHeld = aHeld;
+                  IOSInputBridge.BHeld = bHeld;
+                  IOSInputBridge.StartHeld = startHeld;
+                  IOSInputBridge.LeftStick = stick;
+
+                  if (Time.unscaledTime >= nextVisualFix)
+                  {
+                      nextVisualFix = Time.unscaledTime + 2f;
+                      EnsureEventSystem();
+                      FixBrokenTitleTextures();
+                  }
+              }
+
+              private static void EnsureEventSystem()
+              {
+                  EventSystem es = FindObjectOfType<EventSystem>();
+
+                  if (es == null)
+                  {
+                      GameObject go = new GameObject("EventSystem_iOS");
+                      es = go.AddComponent<EventSystem>();
+                      go.AddComponent<StandaloneInputModule>();
+                  }
+                  else
+                  {
+                      es.enabled = true;
+                      BaseInputModule[] modules = es.GetComponents<BaseInputModule>();
+
+                      if (modules == null || modules.Length == 0)
+                          es.gameObject.AddComponent<StandaloneInputModule>();
+                      else
+                          for (int i = 0; i < modules.Length; i++)
+                              modules[i].enabled = true;
+                  }
+              }
+
+              private static bool LooksLikeTitleUI(string name)
+              {
+                  if (String.IsNullOrEmpty(name)) return false;
+                  string n = name.ToLowerInvariant();
+
+                  return n.Contains("sonic") || n.Contains("title") ||
+                         n.Contains("logo") || n.Contains("menu") ||
+                         n.Contains("loading") || n.Contains("splash") ||
+                         n.Contains("background") || n.Contains("sega");
+              }
+
+              private static void FixBrokenTitleTextures()
+              {
+                  RawImage[] raws = Resources.FindObjectsOfTypeAll<RawImage>();
+
+                  for (int i = 0; i < raws.Length; i++)
+                  {
+                      RawImage r = raws[i];
+                      if (r == null || !LooksLikeTitleUI(r.name)) continue;
+
+                      if (r.texture != null)
+                          r.texture.wrapMode = TextureWrapMode.Clamp;
+
+                      r.uvRect = new Rect(0f, 0f, 1f, 1f);
+                  }
+
+                  Image[] images = Resources.FindObjectsOfTypeAll<Image>();
+
+                  for (int i = 0; i < images.Length; i++)
+                  {
+                      Image img = images[i];
+                      if (img == null || !LooksLikeTitleUI(img.name)) continue;
+
+                      if (img.sprite != null && img.sprite.texture != null)
+                          img.sprite.texture.wrapMode = TextureWrapMode.Clamp;
+                  }
+
+                  Renderer[] renderers = Resources.FindObjectsOfTypeAll<Renderer>();
+
+                  for (int i = 0; i < renderers.Length; i++)
+                  {
+                      Renderer r = renderers[i];
+                      if (r == null || !LooksLikeTitleUI(r.name)) continue;
+
+                      Material[] mats = r.sharedMaterials;
+                      if (mats == null) continue;
+
+                      for (int m = 0; m < mats.Length; m++)
+                      {
+                          Material mat = mats[m];
+                          if (mat == null || mat.mainTexture == null) continue;
+
+                          mat.mainTexture.wrapMode = TextureWrapMode.Clamp;
+                          mat.mainTextureScale = Vector2.one;
+                          mat.mainTextureOffset = Vector2.zero;
+                      }
+                  }
+              }
+          }
+          CS
+
+          echo "===== V21 INPUT PATCH REPORT ====="
+          wc -l output/v21-input-patched-files.txt || true
+          head -120 output/v21-input-patched-files.txt || true
+
+          echo "===== V21 FIX: CLAMP MENU / LOGO / LOADING TEXTURES ====="
+          : > output/v21-clamped-ui-textures.txt
 
           # The current iOS build shows the SONIC title texture tiled across
           # the whole screen. AssetRipper can restore some UI textures with
@@ -446,7 +930,7 @@ jobs:
               *logo*|*title*|*loading*|*control*|*menu*|*splash*|*background*|*/bg_*|*_bg.*|*sega*)
                 if grep -qE '^[[:space:]]*wrapMode:[[:space:]]*0([[:space:]]|$)' "$META"; then
                   sed -Ei 's/^([[:space:]]*wrapMode:)[[:space:]]*0([[:space:]]*)$/\1 1\2/' "$META"
-                  echo "$IMG" >> output/v20-clamped-ui-textures.txt
+                  echo "$IMG" >> output/v21-clamped-ui-textures.txt
                 fi
 
                 # Some Unity 2018 metas use per-axis wrap fields.
@@ -465,7 +949,7 @@ jobs:
           )
 
           echo "Clamped UI textures:"
-          cat output/v20-clamped-ui-textures.txt || true
+          cat output/v21-clamped-ui-textures.txt || true
 
       - name: Create recovery report
         run: |
@@ -510,7 +994,8 @@ jobs:
             output/touch-csharp-references.txt
             output/removed-android-plugins.txt
             output/removed-duplicate-spatialtracking.txt
-            output/v20-clamped-ui-textures.txt
+            output/v21-clamped-ui-textures.txt
+            output/v21-input-patched-files.txt
           compression-level: 0
 
   build_unity_ios:
@@ -596,7 +1081,7 @@ jobs:
           set -e
 
           PROJECT="${{ steps.locate.outputs.project }}"
-          echo "===== V20 UI + ICON FIX ====="
+          echo "===== V21 TOUCH INPUT FIX ====="
 
           # Start the first attempt from a clean import. The second attempt below
           # intentionally keeps the freshly generated Library cache, because v11
@@ -607,13 +1092,14 @@ jobs:
 
           # Attempt 1 preserves the game assets/settings; attempt 2 only resets GraphicsSettings.
           # The original GraphicsSettings is backed up before the fallback retry.
-          cat > "$PROJECT/V20-CI-PATCH.txt" <<'EOF'
-          Sonic 2006 iOS v20 CI patch
-          - keep all working Unity fixes from v16/v17/v18
-          - clamp likely title/menu/loading textures to stop the tiled SONIC background
-          - restore executable bits on Unity shell scripts before Xcode build
-          - replace Unity's default iOS icon with the original Android app icon
-          - keep unsigned arm64 output for KSign packaging
+          cat > "$PROJECT/V21-CI-PATCH.txt" <<'EOF'
+          Sonic 2006 iOS v21 CI patch
+          - keep all working Unity/Xcode/icon fixes
+          - re-enable recovered Android mobile-input paths on iOS
+          - route classic Input.GetButton/GetKey/GetAxis calls through an iOS touch bridge
+          - repair/enable EventSystem automatically on every scene
+          - add working A/B/Start touch zones and left movement stick fallback
+          - runtime-fix tiled title/menu textures as well as importer wrap mode
           EOF
 
       - name: Setup Node 22 for Unity CLI
@@ -985,7 +1471,7 @@ jobs:
           set +e
 
           PROJECT="${{ steps.locate.outputs.project }}"
-          echo "===== V20 WARM RETRY ====="
+          echo "===== V21 WARM RETRY ====="
           echo "Attempt 1 used legacy GL Core + single-threaded graphics."
           echo "For attempt 2 we also regenerate GraphicsSettings.asset."
 
@@ -1034,7 +1520,7 @@ jobs:
         run: |
           set +e
 
-          echo "===== V20 FINAL XCODE DETECTION ====="
+          echo "===== V21 FINAL XCODE DETECTION ====="
           echo "ATTEMPT1=${{ steps.unity_build_1.outcome }} / engine=${{ steps.unity_build_1.outputs.engineExitCode }}"
           echo "ATTEMPT2=${{ steps.unity_build_2.outcome }} / engine=${{ steps.unity_build_2.outputs.engineExitCode }}"
 
@@ -1078,7 +1564,7 @@ jobs:
           mkdir -p unity-build-diagnostics
 
           {
-            echo "V20=true"
+            echo "V21=true"
             echo "ATTEMPT1_OUTCOME=${{ steps.unity_build_1.outcome }}"
             echo "ATTEMPT1_ENGINE_EXIT=${{ steps.unity_build_1.outputs.engineExitCode }}"
             echo "ATTEMPT2_OUTCOME=${{ steps.unity_build_2.outcome }}"
@@ -1167,7 +1653,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-Unity-Build-Diagnostics-v20
+          name: Sonic-2006-Unity-Build-Diagnostics-v21
           path: unity-build-diagnostics
           if-no-files-found: ignore
           compression-level: 0
@@ -1194,7 +1680,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-Unity-iOS-FAIL-v20
+          name: Sonic-2006-Unity-iOS-FAIL-v21
           path: recovered-artifact
           if-no-files-found: ignore
           compression-level: 0
@@ -1387,16 +1873,16 @@ jobs:
             --sequesterRsrc \
             --keepParent \
             Payload \
-            output/Sonic-2006-iOS-KSign-v20.ipa
+            output/Sonic-2006-iOS-KSign-v21.ipa
 
-          ls -lh output/Sonic-2006-iOS-KSign-v20.ipa
+          ls -lh output/Sonic-2006-iOS-KSign-v21.ipa
 
       - name: Upload Sonic iOS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-iOS-KSign-v20
+          name: Sonic-2006-iOS-KSign-v21
           path: |
-            output/Sonic-2006-iOS-KSign-v20.ipa
+            output/Sonic-2006-iOS-KSign-v21.ipa
             xcodebuild.log
           compression-level: 0
 
@@ -1488,7 +1974,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-FULL-Unity-Log-v20
+          name: Sonic-2006-FULL-Unity-Log-v21
           path: full-unity-log
           if-no-files-found: warn
           compression-level: 0
