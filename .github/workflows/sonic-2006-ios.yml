@@ -1,4 +1,4 @@
-name: Sonic P-06 Sonic Release iOS - v3
+name: Sonic P-06 Sonic Release iOS - v4
 
 on:
   workflow_dispatch:
@@ -280,7 +280,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-APK-Inspection-v3
+          name: Sonic-P06-Sonic-Release-APK-Inspection-v4
           path: |
             output/apk-size.txt
             output/unzip-status.txt
@@ -298,16 +298,106 @@ jobs:
           if-no-files-found: ignore
           compression-level: 0
 
-      - name: Stop if APK inspection is incompatible
+      - name: Continue with deep Unity probe
         if: steps.inspect.outcome != 'success'
         run: |
-          echo "===== APK INSPECTION FAILED / DIFFERENT BUILD ====="
+          echo "===== STANDARD UNITY LAYOUT NOT FOUND ====="
           cat output/unity-version.txt 2>/dev/null || true
           cat output/script-backend.txt 2>/dev/null || true
-          cat output/compatibility.txt 2>/dev/null || true
           echo
-          echo "Open artifact: Sonic-P06-Sonic-Release-APK-Inspection-v3"
-          exit 1
+          echo "v4 will NOT stop here."
+          echo "AssetRipper will scan the whole extracted APK next."
+          echo "We will also scan for UnityFS bundles, libunity.so and nested OBB/ZIP data."
+
+      - name: Deep scan APK for Unity data
+        run: |
+          set +e
+          mkdir -p output work/nested
+
+          echo "===== UNITY-NAMED FILES ====="
+          find work/android -type f \
+            \( -iname "globalgamemanagers" \
+               -o -iname "resources.assets" \
+               -o -iname "sharedassets*.assets" \
+               -o -iname "global-metadata.dat" \
+               -o -iname "Assembly-CSharp.dll" \
+               -o -iname "libunity.so" \
+               -o -iname "libil2cpp.so" \
+               -o -iname "*.unity3d" \
+               -o -iname "*.bundle" \) \
+            -printf '%p  %s bytes\n' \
+            | sort \
+            | tee output/deep-unity-files.txt
+
+          echo "===== UNITYFS MAGIC ====="
+          find work/android -type f -size +32k -size -600M -print0 \
+            | while IFS= read -r -d '' f; do
+                if head -c 64 "$f" 2>/dev/null | grep -aq "UnityFS"; then
+                  echo "$f"
+                fi
+              done \
+            | tee output/unityfs-files.txt
+
+          echo "===== UNITY HINTS ====="
+          {
+            find work/android -type f -iname "libunity.so" -print
+            find work/android -type f -iname "libil2cpp.so" -print
+            strings work/android/AndroidManifest.xml 2>/dev/null \
+              | grep -Ei "unity|player|il2cpp" \
+              | head -200
+          } | tee output/unity-hints.txt
+
+          echo "===== NESTED OBB/ZIP ====="
+          find work/android -type f \
+            \( -iname "*.obb" -o -iname "*.zip" \) \
+            -printf '%p  %s bytes\n' \
+            | sort \
+            | tee output/nested-archives.txt
+
+          n=0
+          while IFS= read -r archive; do
+            [ -f "$archive" ] || continue
+            if unzip -tqq "$archive" >/dev/null 2>&1; then
+              n=$((n+1))
+              mkdir -p "work/nested/$n"
+              unzip -q "$archive" -d "work/nested/$n" || true
+            fi
+          done < <(
+            find work/android -type f \( -iname "*.obb" -o -iname "*.zip" \) -print
+          )
+
+          echo "===== UNITY FILES IN NESTED DATA ====="
+          find work/nested -type f \
+            \( -iname "globalgamemanagers" \
+               -o -iname "resources.assets" \
+               -o -iname "sharedassets*.assets" \
+               -o -iname "global-metadata.dat" \
+               -o -iname "Assembly-CSharp.dll" \
+               -o -iname "libunity.so" \
+               -o -iname "libil2cpp.so" \
+               -o -iname "*.unity3d" \
+               -o -iname "*.bundle" \) \
+            -printf '%p  %s bytes\n' \
+            | sort \
+            | tee output/nested-unity-files.txt
+
+          GGM=$(find work/android work/nested -type f -name globalgamemanagers -print | head -1)
+          RES=$(find work/android work/nested -type f -name resources.assets -print | head -1)
+          UNITYFS=$(cat output/unityfs-files.txt 2>/dev/null | head -1)
+
+          if [ -n "$GGM" ]; then
+            TARGET="$(dirname "$GGM")"
+          elif [ -n "$RES" ]; then
+            TARGET="$(dirname "$RES")"
+          elif [ -n "$UNITYFS" ]; then
+            TARGET="$(dirname "$UNITYFS")"
+          else
+            TARGET="$PWD/work/android"
+          fi
+
+          TARGET="$(cd "$TARGET" 2>/dev/null && pwd || echo "$PWD/work/android")"
+          echo "$TARGET" | tee output/assetripper-load-target.txt
+          echo "ASSETRIPPER_LOAD_TARGET=$TARGET"
 
       - name: Download AssetRipper 2.0.0
         env:
@@ -425,8 +515,13 @@ jobs:
             exit 1
           fi
 
-          DATA_DIR="$PWD/work/android/assets/bin/Data"
+          DATA_DIR=$(cat output/assetripper-load-target.txt 2>/dev/null || true)
+          if [ -z "$DATA_DIR" ] || [ ! -d "$DATA_DIR" ]; then
+            DATA_DIR="$PWD/work/android"
+          fi
           EXPORT_DIR="$PWD/recovered/SonicP06Release"
+
+          echo "ASSETRIPPER LOAD TARGET: $DATA_DIR"
 
           mkdir -p "$EXPORT_DIR"
 
@@ -512,9 +607,17 @@ jobs:
           PROJECT=$(cat output/recovered-project-path.txt)
 
           mkdir -p output/original-managed
-          cp \
-            work/android/assets/bin/Data/Managed/Assembly-CSharp.dll \
-            output/original-managed/Assembly-CSharp.dll
+
+          ORIGINAL_CSHARP=$(
+            find work/android work/nested -type f               -path "*/Managed/Assembly-CSharp.dll" -print               | head -1
+          )
+
+          if [ -n "$ORIGINAL_CSHARP" ]; then
+            cp "$ORIGINAL_CSHARP" output/original-managed/Assembly-CSharp.dll
+            echo "Original managed DLL: $ORIGINAL_CSHARP"
+          else
+            echo "No original Assembly-CSharp.dll found; continuing with recovered project."
+          fi
 
           # Android native binaries cannot run on iOS.
           # Keep a report, but remove Android-only plugins from the Unity project.
@@ -549,6 +652,13 @@ jobs:
           echo "Duplicate SpatialTrackingModule removed."
 
           mkdir -p "$PROJECT/ProjectSettings"
+
+          echo "===== RECOVERED PROJECT VERSION BEFORE COMPAT PATCH ====="
+          if [ -f "$PROJECT/ProjectSettings/ProjectVersion.txt" ]; then
+            cat "$PROJECT/ProjectSettings/ProjectVersion.txt"               | tee output/recovered-project-version-original.txt
+          else
+            echo "AssetRipper did not emit ProjectVersion.txt"               | tee output/recovered-project-version-original.txt
+          fi
 
           cat > "$PROJECT/ProjectSettings/ProjectVersion.txt" <<'EOF'
           m_EditorVersion: 2018.2.0f2
@@ -1717,7 +1827,7 @@ jobs:
           # Attempt 1 preserves the game assets/settings; attempt 2 only resets GraphicsSettings.
           # The original GraphicsSettings is backed up before the fallback retry.
           cat > "$PROJECT/SONIC-RELEASE-v1-CI-PATCH.txt" <<'EOF'
-          Sonic P-06 Sonic Release iOS v3
+          Sonic P-06 Sonic Release iOS v4
           - use the NEWEST GitHub Release APK, selecting the largest APK asset
           - reuse our proven AssetRipper -> Unity -> Xcode -> unsigned IPA pipeline
           - keep old Unity 2018.2 compiler/Xcode fixes
@@ -2277,7 +2387,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v3
+          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v4
           path: unity-build-diagnostics
           if-no-files-found: ignore
           compression-level: 0
@@ -2304,7 +2414,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-Unity-iOS-FAIL-v3
+          name: Sonic-P06-Sonic-Release-Unity-iOS-FAIL-v4
           path: recovered-artifact
           if-no-files-found: ignore
           compression-level: 0
@@ -2497,16 +2607,16 @@ jobs:
             --sequesterRsrc \
             --keepParent \
             Payload \
-            output/Sonic-P06-Sonic-Release-iOS-KSign-v3.ipa
+            output/Sonic-P06-Sonic-Release-iOS-KSign-v4.ipa
 
-          ls -lh output/Sonic-P06-Sonic-Release-iOS-KSign-v3.ipa
+          ls -lh output/Sonic-P06-Sonic-Release-iOS-KSign-v4.ipa
 
       - name: Upload Sonic iOS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-iOS-KSign-v3
+          name: Sonic-P06-Sonic-Release-iOS-KSign-v4
           path: |
-            output/Sonic-P06-Sonic-Release-iOS-KSign-v3.ipa
+            output/Sonic-P06-Sonic-Release-iOS-KSign-v4.ipa
             xcodebuild.log
           compression-level: 0
 
@@ -2598,7 +2708,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-FULL-Unity-Log-v3
+          name: Sonic-P06-Sonic-Release-FULL-Unity-Log-v4
           path: full-unity-log
           if-no-files-found: warn
           compression-level: 0
