@@ -1,4 +1,4 @@
-name: Sonic P-06 Sonic Release iOS - v5
+name: Sonic P-06 Sonic Release iOS - v6
 
 on:
   workflow_dispatch:
@@ -284,7 +284,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-APK-Inspection-v5
+          name: Sonic-P06-Sonic-Release-APK-Inspection-v6
           path: |
             output/apk-size.txt
             output/unzip-status.txt
@@ -936,7 +936,7 @@ jobs:
           # Attempt 1 preserves the game assets/settings; attempt 2 only resets GraphicsSettings.
           # The original GraphicsSettings is backed up before the fallback retry.
           cat > "$PROJECT/SONIC-RELEASE-v5-CI-PATCH.txt" <<'EOF'
-          Sonic P-06 Sonic Release iOS v5
+          Sonic P-06 Sonic Release iOS v6
           - clean build for the FULL Sonic Release, not the old demo
           - preserve AssetRipper's recovered Unity editor version
           - do not inject old-demo touch/XInput/UI hacks before the first clean compile
@@ -1496,7 +1496,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v5
+          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v6
           path: unity-build-diagnostics
           if-no-files-found: ignore
           compression-level: 0
@@ -1523,7 +1523,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-Unity-iOS-FAIL-v5
+          name: Sonic-P06-Sonic-Release-Unity-iOS-FAIL-v6
           path: recovered-artifact
           if-no-files-found: ignore
           compression-level: 0
@@ -1545,7 +1545,7 @@ jobs:
           fi
 
           echo
-          echo "Artifact: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v5"
+          echo "Artifact: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v6"
           exit 1
 
   package_unsigned_ipa:
@@ -1656,10 +1656,133 @@ jobs:
             echo "WARNING: APK not found in repo/release; keeping Unity icon."
           fi
 
+      - name: Patch Xcode project for missing movies and modern Xcode
+        run: |
+          set -euo pipefail
+
+          echo "===== XCODE v6 PRECHECK ====="
+
+          PROJ=$(find unity-ios -type d -name "*.xcodeproj" | head -1)
+          if [ -z "$PROJ" ]; then
+            echo "ERROR: Unity Xcode project not found."
+            exit 1
+          fi
+
+          PBX="$PROJ/project.pbxproj"
+          test -f "$PBX"
+
+          echo "===== VIDEO FILES EXPORTED BY UNITY ====="
+          find unity-ios -type f \
+            \( -iname "*.mp4" -o -iname "*.mov" -o -iname "*.m4v" \
+               -o -iname "*.webm" -o -iname "*.ogv" -o -iname "*.avi" \) \
+            -printf '%p  %s bytes\n' 2>/dev/null \
+            | sort \
+            | tee xcode-video-files.txt || true
+
+          echo "===== ZERO/TINY VIDEO FILES ====="
+          find unity-ios -type f \
+            \( -iname "*.mp4" -o -iname "*.mov" -o -iname "*.m4v" \
+               -o -iname "*.webm" -o -iname "*.ogv" -o -iname "*.avi" \) \
+            -size -2048c \
+            -printf '%p  %s bytes\n' 2>/dev/null \
+            | tee xcode-broken-videos.txt || true
+
+          # AssetRipper can recover a scene while failing to recover one or more
+          # movie assets. Xcode then keeps references to files that do not exist.
+          # Remove ONLY missing/empty movie references from project.pbxproj.
+          python3 - "$PBX" <<'PY'
+          import os, re, sys
+          from pathlib import Path
+
+          pbx = Path(sys.argv[1])
+          root = pbx.parent.parent
+          data = pbx.read_text(errors="ignore")
+          lines = data.splitlines(True)
+
+          video_exts = (".mp4", ".mov", ".m4v", ".webm", ".ogv", ".avi")
+
+          # Basenames that actually exist and are non-empty.
+          existing = {}
+          for p in root.rglob("*"):
+              if p.is_file() and p.suffix.lower() in video_exts:
+                  try:
+                      if p.stat().st_size > 2048:
+                          existing.setdefault(p.name.lower(), []).append(p)
+                  except OSError:
+                      pass
+
+          missing_file_refs = set()
+          missing_names = set()
+
+          # PBXFileReference lines are normally one physical line.
+          ref_re = re.compile(
+              r'^\s*([0-9A-Fa-f]{24}) /\* (.*?) \*/ = '
+              r'\{isa = PBXFileReference;.*?path = (.*?);.*?\};'
+          )
+
+          for line in lines:
+              m = ref_re.search(line)
+              if not m:
+                  continue
+              uid, comment, raw_path = m.groups()
+              name = comment.strip().strip('"')
+              raw_path = raw_path.strip().strip('"')
+              candidate_name = os.path.basename(raw_path or name)
+
+              if candidate_name.lower().endswith(video_exts):
+                  if candidate_name.lower() not in existing:
+                      missing_file_refs.add(uid)
+                      missing_names.add(candidate_name)
+
+          # PBXBuildFile entries referencing the bad PBXFileReference UUIDs.
+          bad_build_refs = set()
+          for line in lines:
+              m = re.search(
+                  r'^\s*([0-9A-Fa-f]{24}) /\* .*? \*/ = '
+                  r'\{isa = PBXBuildFile; fileRef = ([0-9A-Fa-f]{24}) ',
+                  line,
+              )
+              if m and m.group(2) in missing_file_refs:
+                  bad_build_refs.add(m.group(1))
+
+          bad_ids = missing_file_refs | bad_build_refs
+
+          if bad_ids:
+              backup = pbx.with_suffix(".pbxproj.v6-backup")
+              backup.write_text(data)
+
+              kept = []
+              for line in lines:
+                  if any(uid in line for uid in bad_ids):
+                      continue
+                  kept.append(line)
+
+              pbx.write_text("".join(kept))
+
+          report = Path("xcode-missing-movie-pbxrefs.txt")
+          report.write_text(
+              "Missing/broken movie names:\\n" +
+              "\\n".join(sorted(missing_names)) +
+              "\\n\\nRemoved PBX UUIDs:\\n" +
+              "\\n".join(sorted(bad_ids)) +
+              "\\n"
+          )
+
+          print("Missing movie refs:", len(missing_file_refs))
+          print("PBX entries removed:", len(bad_ids))
+          for n in sorted(missing_names):
+              print("  removed missing movie:", n)
+          PY
+
+          echo "===== SHELL SCRIPT PERMISSIONS ====="
+          find unity-ios -type f -name "*.sh" -exec chmod +x {} \;
+
+          echo "===== PATCH RESULT ====="
+          cat xcode-missing-movie-pbxrefs.txt || true
+
       - name: Build unsigned arm64 app
         run: |
-          set -e
-          set -o pipefail
+          set -uo pipefail
 
           PROJ=$(find unity-ios -type d -name "*.xcodeproj" | head -1)
 
@@ -1670,13 +1793,12 @@ jobs:
           fi
 
           echo "XCODE_PROJECT=$PROJ"
+          echo "===== XCODE VERSION ====="
+          xcodebuild -version
 
           echo "===== XCODE PROJECT SCHEMES ====="
           xcodebuild -project "$PROJ" -list || true
 
-          # Modern Xcode does not allow -derivedDataPath together with -target.
-          # Unity's generated app scheme is normally Unity-iPhone, so use
-          # -scheme instead. This is the exact fix for v17 exit code 64.
           SCHEME="Unity-iPhone"
 
           if ! xcodebuild -project "$PROJ" -list 2>/dev/null \
@@ -1686,7 +1808,11 @@ jobs:
               xcodebuild -project "$PROJ" -list 2>/dev/null \
                 | awk '
                     /Schemes:/ {in_schemes=1; next}
-                    in_schemes && NF {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); print; exit}
+                    in_schemes && NF {
+                      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+                      print
+                      exit
+                    }
                   '
             )
             if [ -n "$DETECTED_SCHEME" ]; then
@@ -1696,6 +1822,10 @@ jobs:
 
           echo "XCODE_SCHEME=$SCHEME"
 
+          rm -rf "$PWD/DerivedData"
+
+          echo "===== XCODE BUILD ATTEMPT 1 ====="
+          set +e
           xcodebuild \
             -project "$PROJ" \
             -scheme "$SCHEME" \
@@ -1706,14 +1836,91 @@ jobs:
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=NO \
             IPHONEOS_DEPLOYMENT_TARGET=15.0 \
-            PRODUCT_BUNDLE_IDENTIFIER="com.sonic2006.ios.port" \
+            PRODUCT_BUNDLE_IDENTIFIER="com.sonicp06.release.ios" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            ENABLE_BITCODE=NO \
             build \
-            2>&1 | tee xcodebuild.log
+            2>&1 | tee xcodebuild-attempt1.log
+          CODE1=${PIPESTATUS[0]}
+          set -e
 
-      - name: Locate app and create KSign IPA
+          echo "ATTEMPT1_EXIT=$CODE1"
+
+          if [ "$CODE1" -ne 0 ]; then
+            echo
+            echo "===== EXACT XCODE ERRORS - ATTEMPT 1 ====="
+            grep -nEi \
+              '(^|[[:space:]])(error:|fatal error:)|undefined symbols|duplicate symbol|command .* failed|phasescriptexecution|permission denied|build input file cannot be found|no such file or directory|clang: error|ld: ' \
+              xcodebuild-attempt1.log \
+              | tail -250 \
+              | tee xcode-errors-attempt1.txt || true
+
+            echo
+            echo "===== RETRY PREP ====="
+            find unity-ios -type f -name "*.sh" -exec chmod +x {} \;
+            xattr -cr unity-ios 2>/dev/null || true
+            rm -rf "$PWD/DerivedData"
+
+            echo "===== XCODE BUILD ATTEMPT 2 - COMPATIBILITY MODE ====="
+            set +e
+            xcodebuild \
+              -project "$PROJ" \
+              -scheme "$SCHEME" \
+              -configuration Release \
+              -sdk iphoneos \
+              -destination "generic/platform=iOS" \
+              -derivedDataPath "$PWD/DerivedData" \
+              ARCHS=arm64 \
+              ONLY_ACTIVE_ARCH=NO \
+              IPHONEOS_DEPLOYMENT_TARGET=15.0 \
+              PRODUCT_BUNDLE_IDENTIFIER="com.sonicp06.release.ios" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              ENABLE_BITCODE=NO \
+              GCC_TREAT_WARNINGS_AS_ERRORS=NO \
+              CLANG_WARN_DOCUMENTATION_COMMENTS=NO \
+              CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER=NO \
+              SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
+              COMPILER_INDEX_STORE_ENABLE=NO \
+              -jobs 1 \
+              build \
+              2>&1 | tee xcodebuild-attempt2.log
+            CODE2=${PIPESTATUS[0]}
+            set -e
+
+            echo "ATTEMPT2_EXIT=$CODE2"
+
+            if [ "$CODE2" -ne 0 ]; then
+              echo
+              echo "===== EXACT XCODE ERRORS - ATTEMPT 2 ====="
+              grep -nEi \
+                '(^|[[:space:]])(error:|fatal error:)|undefined symbols|duplicate symbol|command .* failed|phasescriptexecution|permission denied|build input file cannot be found|no such file or directory|clang: error|ld: ' \
+                xcodebuild-attempt2.log \
+                | tail -300 \
+                | tee xcode-errors-attempt2.txt || true
+
+              {
+                echo "===== ATTEMPT 1 ====="
+                cat xcode-errors-attempt1.txt 2>/dev/null || true
+                echo
+                echo "===== ATTEMPT 2 ====="
+                cat xcode-errors-attempt2.txt 2>/dev/null || true
+              } > xcode-errors-final.txt
+
+              echo
+              echo "===== FINAL XCODE FAILURE SUMMARY ====="
+              cat xcode-errors-final.txt
+              exit "$CODE2"
+            fi
+          fi
+
+          echo "===== XCODE BUILD SUCCEEDED ====="
+          find DerivedData -type d -name "*.app" -print
+
+      - name: Locate app and create Signulous-ready IPA
         run: |
           set -e
 
@@ -1729,33 +1936,45 @@ jobs:
 
           cp -R "$APP" Payload/
 
-          # KSign will perform the real signing on the iPhone.
+          # Signulous will perform the real signing on the iPhone.
           ditto \
             -c \
             -k \
             --sequesterRsrc \
             --keepParent \
             Payload \
-            output/Sonic-P06-Sonic-Release-iOS-v5.ipa
+            output/Sonic-P06-Sonic-Release-iOS-v6.ipa
 
-          ls -lh output/Sonic-P06-Sonic-Release-iOS-v5.ipa
+          ls -lh output/Sonic-P06-Sonic-Release-iOS-v6.ipa
 
       - name: Upload Sonic iOS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-iOS-v5
+          name: Sonic-P06-Sonic-Release-iOS-v6
           path: |
-            output/Sonic-P06-Sonic-Release-iOS-v5.ipa
-            xcodebuild.log
+            output/Sonic-P06-Sonic-Release-iOS-v6.ipa
+            xcodebuild-attempt1.log
+            xcodebuild-attempt2.log
+            xcode-missing-movie-pbxrefs.txt
+          if-no-files-found: ignore
           compression-level: 0
 
       - name: Upload Xcode failure log
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-Xcode-FAIL
-          path: xcodebuild.log
+          name: Sonic-P06-Xcode-FAIL-v6
+          path: |
+            xcodebuild-attempt1.log
+            xcodebuild-attempt2.log
+            xcode-errors-attempt1.txt
+            xcode-errors-attempt2.txt
+            xcode-errors-final.txt
+            xcode-video-files.txt
+            xcode-broken-videos.txt
+            xcode-missing-movie-pbxrefs.txt
           if-no-files-found: ignore
+          compression-level: 0
 
   capture_full_unity_log:
     name: Capture full Unity crash log
@@ -1837,7 +2056,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-FULL-Unity-Log-v5
+          name: Sonic-P06-Sonic-Release-FULL-Unity-Log-v6
           path: full-unity-log
           if-no-files-found: warn
           compression-level: 0
