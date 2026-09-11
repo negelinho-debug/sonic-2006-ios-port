@@ -1,4 +1,4 @@
-name: Sonic P-06 iOS - v8 FAST (2 jobs)
+name: Sonic P-06 iOS - v9 FAST (2 jobs)
 
 on:
   workflow_dispatch:
@@ -282,7 +282,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-APK-Inspection-v8
+          name: Sonic-P06-Sonic-Release-APK-Inspection-v9
           path: |
             output/apk-size.txt
             output/unzip-status.txt
@@ -699,6 +699,9 @@ jobs:
 
           echo "unity_version=$EDITOR_VERSION" >> "$GITHUB_OUTPUT"
           echo "unity_changeset=$CHANGESET" >> "$GITHUB_OUTPUT"
+          echo "project_path=$PROJECT" >> "$GITHUB_OUTPUT"
+
+          echo "EXACT_PROJECT_PATH=$PROJECT"
 
           echo "===== FINAL PROJECT VERSION FILE ====="
           cat "$VERSION_FILE"
@@ -832,18 +835,30 @@ jobs:
 
           echo "UNITY LOGIN SECRETS: OK"
 
-      - name: Verify same-runner recovered Unity project
+      - name: Show exact recovered project layout
+        run: |
+          set -e
+          echo "Path from AssetRipper:"
+          cat output/recovered-project-path.txt
+          echo
+          echo "Recovered root:"
+          find recovered/SonicP06Release -maxdepth 2 -type d | sort | head -100
+
+      - name: Verify exact AssetRipper Unity project
         run: |
           set -e
 
-          PROJECT="recovered/SonicP06Release"
+          PROJECT="${{ steps.prepare_ios.outputs.project_path }}"
           VERSION_FILE="$PROJECT/ProjectSettings/ProjectVersion.txt"
 
-          echo "===== V8 FAST: SAME RUNNER PROJECT ====="
+          echo "===== V9 FAST: EXACT ASSETRIPPER PROJECT PATH ====="
+          echo "PROJECT=$PROJECT"
+
+          test -n "$PROJECT"
           test -d "$PROJECT"
+          test -d "$PROJECT/Assets"
           test -f "$VERSION_FILE"
 
-          echo "PROJECT=$PROJECT"
           echo "Recovered editor: ${{ steps.prepare_ios.outputs.unity_version }}"
           echo "Recovered changeset: ${{ steps.prepare_ios.outputs.unity_changeset }}"
           echo "ProjectVersion.txt:"
@@ -855,7 +870,7 @@ jobs:
         run: |
           set -e
 
-          PROJECT="recovered/SonicP06Release"
+          PROJECT="${{ steps.prepare_ios.outputs.project_path }}"
           echo "===== SONIC RELEASE v1 ====="
 
           # Start the first attempt from a clean import. The second attempt below
@@ -868,7 +883,7 @@ jobs:
           # Attempt 1 preserves the game assets/settings; attempt 2 only resets GraphicsSettings.
           # The original GraphicsSettings is backed up before the fallback retry.
           cat > "$PROJECT/SONIC-RELEASE-v5-CI-PATCH.txt" <<'EOF'
-          Sonic P-06 Sonic Release iOS v8 FAST
+          Sonic P-06 Sonic Release iOS v9 FAST
           - clean build for the FULL Sonic Release, not the old demo
           - preserve AssetRipper's recovered Unity editor version
           - do not inject old-demo touch/XInput/UI hacks before the first clean compile
@@ -1208,7 +1223,7 @@ jobs:
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
           UNITY_LICENSE: ${{ env.UNITY_LICENSE }}
         with:
-          projectPath: recovered/SonicP06Release
+          projectPath: ${{ steps.prepare_ios.outputs.project_path }}
           targetPlatform: iOS
           unityVersion: ${{ steps.prepare_ios.outputs.unity_version }}
           buildsPath: build
@@ -1226,7 +1241,7 @@ jobs:
           echo "ATTEMPT1_OUTCOME=${{ steps.unity_build_1.outcome }}"
           echo "ATTEMPT1_ENGINE_EXIT=${{ steps.unity_build_1.outputs.engineExitCode }}"
 
-          PROJECT="recovered/SonicP06Release"
+          PROJECT="${{ steps.prepare_ios.outputs.project_path }}"
           sudo chown -R "$(id -u):$(id -g)" "$PROJECT" build 2>/dev/null || true
           chmod -R u+rwX "$PROJECT" build 2>/dev/null || true
 
@@ -1244,8 +1259,8 @@ jobs:
         run: |
           set +e
 
-          PROJECT="recovered/SonicP06Release"
-          echo "===== V8 FAST WARM RETRY ====="
+          PROJECT="${{ steps.prepare_ios.outputs.project_path }}"
+          echo "===== V9 FAST WARM RETRY ====="
           echo "Attempt 1 used legacy GL Core + single-threaded graphics."
           echo "For attempt 2 we also regenerate GraphicsSettings.asset."
 
@@ -1278,7 +1293,7 @@ jobs:
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
           UNITY_LICENSE: ${{ env.UNITY_LICENSE }}
         with:
-          projectPath: recovered/SonicP06Release
+          projectPath: ${{ steps.prepare_ios.outputs.project_path }}
           targetPlatform: iOS
           unityVersion: ${{ steps.prepare_ios.outputs.unity_version }}
           buildsPath: build
@@ -1293,7 +1308,7 @@ jobs:
         run: |
           set +e
 
-          echo "===== V8 FAST FINAL XCODE DETECTION ====="
+          echo "===== V9 FAST FINAL XCODE DETECTION ====="
           echo "ATTEMPT1=${{ steps.unity_build_1.outcome }} / engine=${{ steps.unity_build_1.outputs.engineExitCode }}"
           echo "ATTEMPT2=${{ steps.unity_build_2.outcome }} / engine=${{ steps.unity_build_2.outputs.engineExitCode }}"
 
@@ -1343,14 +1358,14 @@ jobs:
             echo "ATTEMPT2_OUTCOME=${{ steps.unity_build_2.outcome }}"
             echo "ATTEMPT2_ENGINE_EXIT=${{ steps.unity_build_2.outputs.engineExitCode }}"
             echo "XCODE_READY=${{ steps.detect_xcode.outputs.ready }}"
-            echo "PROJECT=recovered/SonicP06Release"
+            echo "PROJECT=${{ steps.prepare_ios.outputs.project_path }}"
             echo "UNITY_VERSION=${{ steps.prepare_ios.outputs.unity_version }}"
             echo "UNITY_CHANGESET=${{ steps.prepare_ios.outputs.unity_changeset }}"
           } > unity-build-diagnostics/summary.txt
 
           echo "===== FIND UNITY / CRASH LOGS ====="
 
-          PROJECT="recovered/SonicP06Release"
+          PROJECT="${{ steps.prepare_ios.outputs.project_path }}"
 
           for BASE in \
             "$HOME/.local/share/unity3d" \
@@ -1420,7 +1435,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-iOS-Xcode-v8-FAST
+          name: Sonic-P06-iOS-Xcode-v9-FAST
           path: build
           compression-level: 0
 
@@ -1428,7 +1443,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v8
+          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v9
           path: unity-build-diagnostics
           if-no-files-found: ignore
           compression-level: 0
@@ -1437,7 +1452,7 @@ jobs:
         if: always() && steps.detect_xcode.outputs.ready != 'true'
         run: |
           echo "=================================================="
-          echo "SONIC P-06 RELEASE v8 FAST - EXACT UNITY FAILURE"
+          echo "SONIC P-06 RELEASE v9 FAST - EXACT UNITY FAILURE"
           echo "Unity: ${{ steps.prepare_ios.outputs.unity_version }}"
           echo "Attempt 1: ${{ steps.unity_build_1.outcome }} / engine=${{ steps.unity_build_1.outputs.engineExitCode }}"
           echo "Attempt 2: ${{ steps.unity_build_2.outcome }} / engine=${{ steps.unity_build_2.outputs.engineExitCode }}"
@@ -1450,7 +1465,7 @@ jobs:
           fi
 
           echo
-          echo "Artifact: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v8"
+          echo "Artifact: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v9"
           exit 1
 
   make_ipa:
@@ -1464,7 +1479,7 @@ jobs:
       - name: Download Unity Xcode project
         uses: actions/download-artifact@v4
         with:
-          name: Sonic-P06-iOS-Xcode-v8-FAST
+          name: Sonic-P06-iOS-Xcode-v9-FAST
           path: unity-ios
 
       - name: Patch old Unity 2018 headers for current Xcode
@@ -1491,7 +1506,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "===== XCODE v8 FAST PRECHECK ====="
+          echo "===== XCODE v9 FAST PRECHECK ====="
 
           PROJ=$(find unity-ios -type d -name "*.xcodeproj" | head -1)
           if [ -z "$PROJ" ]; then
@@ -1774,16 +1789,16 @@ jobs:
             --sequesterRsrc \
             --keepParent \
             Payload \
-            output/Sonic-P06-Sonic-Release-iOS-v8-FAST.ipa
+            output/Sonic-P06-Sonic-Release-iOS-v9-FAST.ipa
 
-          ls -lh output/Sonic-P06-Sonic-Release-iOS-v8-FAST.ipa
+          ls -lh output/Sonic-P06-Sonic-Release-iOS-v9-FAST.ipa
 
       - name: Upload Sonic iOS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-iOS-v8-FAST
+          name: Sonic-P06-Sonic-Release-iOS-v9-FAST
           path: |
-            output/Sonic-P06-Sonic-Release-iOS-v8-FAST.ipa
+            output/Sonic-P06-Sonic-Release-iOS-v9-FAST.ipa
             xcodebuild-attempt1.log
             xcodebuild-attempt2.log
             xcode-missing-movie-pbxrefs.txt
@@ -1794,7 +1809,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Xcode-FAIL-v8-FAST
+          name: Sonic-P06-Xcode-FAIL-v9-FAST
           path: |
             xcodebuild-attempt1.log
             xcodebuild-attempt2.log
