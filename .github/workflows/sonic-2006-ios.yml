@@ -1,27 +1,25 @@
-name: Sonic P-06 Sonic Release iOS - v6
+name: Sonic P-06 iOS - v7 FAST (2 jobs)
 
 on:
   workflow_dispatch:
-    inputs:
-      try_ios_build:
-        description: "Try Unity iOS build after recovery"
-        required: true
-        default: true
-        type: boolean
 
 permissions:
   contents: read
   actions: read
 
 jobs:
-  recover:
-    name: Recover Unity project
+  build_sonic_ios:
+    name: 1. Build Sonic iOS Xcode
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 240
+
+    env:
+      UNITY_USERNAME: ${{ secrets.UNITY_USERNAME }}
+      UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+      UNITY_EMAIL: ${{ secrets.UNITY_USERNAME }}
 
     outputs:
-      unity_version: ${{ steps.prepare_ios.outputs.unity_version }}
-      unity_changeset: ${{ steps.prepare_ios.outputs.unity_changeset }}
+      xcode_ready: ${{ steps.detect_xcode.outputs.ready }}
 
     steps:
       - name: Checkout
@@ -818,44 +816,6 @@ jobs:
 
           cat output/RECOVERY-REPORT.txt
 
-      - name: Upload recovered Sonic project
-        uses: actions/upload-artifact@v4
-        with:
-          name: Sonic-P06-Sonic-Release-Recovered-Unity-Project
-          path: |
-            recovered/SonicP06Release
-            output/RECOVERY-REPORT.txt
-            output/assetripper.log
-            output/loadfolder-response.txt
-            output/export-response.txt
-            output/assetripper-assets.txt
-            output/recovered-project-path.txt
-            output/mobile-input-markers.txt
-            output/scenes.txt
-            output/android-csharp-references.txt
-            output/touch-csharp-references.txt
-            output/controller-backends-clean.txt
-            output/recovered-project-version-original.txt
-            output/build-unity-version.txt
-            output/removed-android-plugins.txt
-          compression-level: 0
-
-  build_unity_ios:
-    name: Setup + Activate + Build Unity iOS
-    needs: recover
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-
-    env:
-      UNITY_USERNAME: ${{ secrets.UNITY_USERNAME }}
-      UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-      UNITY_EMAIL: ${{ secrets.UNITY_USERNAME }}
-
-    outputs:
-      unity_result: ${{ steps.final_unity.outputs.result }}
-      xcode_ready: ${{ steps.detect_xcode.outputs.ready }}
-
-    steps:
       - name: Check Unity login secrets
         run: |
           set -e
@@ -871,12 +831,6 @@ jobs:
           fi
 
           echo "UNITY LOGIN SECRETS: OK"
-
-      - name: Download recovered project
-        uses: actions/download-artifact@v4
-        with:
-          name: Sonic-P06-Sonic-Release-Recovered-Unity-Project
-          path: recovered-artifact
 
       - name: Locate Unity project
         id: locate
@@ -913,17 +867,17 @@ jobs:
       - name: Verify recovered Unity version metadata
         run: |
           set -e
-          echo "===== V5 CLEAN FULL-RELEASE BUILD ====="
-          echo "Recovered editor from recovery job: ${{ needs.recover.outputs.unity_version }}"
-          echo "Recovered changeset: ${{ needs.recover.outputs.unity_changeset }}"
+          echo "===== V7 FAST FULL-RELEASE BUILD ====="
+          echo "Recovered editor from recovery job: ${{ steps.prepare_ios.outputs.unity_version }}"
+          echo "Recovered changeset: ${{ steps.prepare_ios.outputs.unity_changeset }}"
           echo "ProjectVersion.txt:"
-          cat "${{ steps.locate.outputs.version_file }}"
+          cat "recovered/SonicP06Release/ProjectSettings/ProjectVersion.txt"
 
       - name: Stabilize recovered Sonic Release project for Linux CI
         run: |
           set -e
 
-          PROJECT="${{ steps.locate.outputs.project }}"
+          PROJECT="recovered/SonicP06Release"
           echo "===== SONIC RELEASE v1 ====="
 
           # Start the first attempt from a clean import. The second attempt below
@@ -936,7 +890,7 @@ jobs:
           # Attempt 1 preserves the game assets/settings; attempt 2 only resets GraphicsSettings.
           # The original GraphicsSettings is backed up before the fallback retry.
           cat > "$PROJECT/SONIC-RELEASE-v5-CI-PATCH.txt" <<'EOF'
-          Sonic P-06 Sonic Release iOS v6
+          Sonic P-06 Sonic Release iOS v7 FAST
           - clean build for the FULL Sonic Release, not the old demo
           - preserve AssetRipper's recovered Unity editor version
           - do not inject old-demo touch/XInput/UI hacks before the first clean compile
@@ -1276,9 +1230,9 @@ jobs:
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
           UNITY_LICENSE: ${{ env.UNITY_LICENSE }}
         with:
-          projectPath: ${{ steps.locate.outputs.project }}
+          projectPath: recovered/SonicP06Release
           targetPlatform: iOS
-          unityVersion: ${{ needs.recover.outputs.unity_version }}
+          unityVersion: ${{ steps.prepare_ios.outputs.unity_version }}
           buildsPath: build
           buildName: SonicP06-Release-iOS
           allowDirtyBuild: true
@@ -1294,7 +1248,7 @@ jobs:
           echo "ATTEMPT1_OUTCOME=${{ steps.unity_build_1.outcome }}"
           echo "ATTEMPT1_ENGINE_EXIT=${{ steps.unity_build_1.outputs.engineExitCode }}"
 
-          PROJECT="${{ steps.locate.outputs.project }}"
+          PROJECT="recovered/SonicP06Release"
           sudo chown -R "$(id -u):$(id -g)" "$PROJECT" build 2>/dev/null || true
           chmod -R u+rwX "$PROJECT" build 2>/dev/null || true
 
@@ -1312,8 +1266,8 @@ jobs:
         run: |
           set +e
 
-          PROJECT="${{ steps.locate.outputs.project }}"
-          echo "===== V5 CLEAN WARM RETRY ====="
+          PROJECT="recovered/SonicP06Release"
+          echo "===== V7 FAST WARM RETRY ====="
           echo "Attempt 1 used legacy GL Core + single-threaded graphics."
           echo "For attempt 2 we also regenerate GraphicsSettings.asset."
 
@@ -1346,9 +1300,9 @@ jobs:
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
           UNITY_LICENSE: ${{ env.UNITY_LICENSE }}
         with:
-          projectPath: ${{ steps.locate.outputs.project }}
+          projectPath: recovered/SonicP06Release
           targetPlatform: iOS
-          unityVersion: ${{ needs.recover.outputs.unity_version }}
+          unityVersion: ${{ steps.prepare_ios.outputs.unity_version }}
           buildsPath: build
           buildName: SonicP06-Release-iOS
           allowDirtyBuild: true
@@ -1361,7 +1315,7 @@ jobs:
         run: |
           set +e
 
-          echo "===== V5 FINAL XCODE DETECTION ====="
+          echo "===== V7 FAST FINAL XCODE DETECTION ====="
           echo "ATTEMPT1=${{ steps.unity_build_1.outcome }} / engine=${{ steps.unity_build_1.outputs.engineExitCode }}"
           echo "ATTEMPT2=${{ steps.unity_build_2.outcome }} / engine=${{ steps.unity_build_2.outputs.engineExitCode }}"
 
@@ -1411,14 +1365,14 @@ jobs:
             echo "ATTEMPT2_OUTCOME=${{ steps.unity_build_2.outcome }}"
             echo "ATTEMPT2_ENGINE_EXIT=${{ steps.unity_build_2.outputs.engineExitCode }}"
             echo "XCODE_READY=${{ steps.detect_xcode.outputs.ready }}"
-            echo "PROJECT=${{ steps.locate.outputs.project }}"
-            echo "UNITY_VERSION=${{ needs.recover.outputs.unity_version }}"
-            echo "UNITY_CHANGESET=${{ needs.recover.outputs.unity_changeset }}"
+            echo "PROJECT=recovered/SonicP06Release"
+            echo "UNITY_VERSION=${{ steps.prepare_ios.outputs.unity_version }}"
+            echo "UNITY_CHANGESET=${{ steps.prepare_ios.outputs.unity_changeset }}"
           } > unity-build-diagnostics/summary.txt
 
           echo "===== FIND UNITY / CRASH LOGS ====="
 
-          PROJECT="${{ steps.locate.outputs.project }}"
+          PROJECT="recovered/SonicP06Release"
 
           for BASE in \
             "$HOME/.local/share/unity3d" \
@@ -1488,7 +1442,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-iOS-Xcode
+          name: Sonic-P06-iOS-Xcode-v7-FAST
           path: build
           compression-level: 0
 
@@ -1501,39 +1455,12 @@ jobs:
           if-no-files-found: ignore
           compression-level: 0
 
-      - name: Clean failed recovered project permissions
-        if: steps.detect_xcode.outputs.ready != 'true'
-        run: |
-          set +e
-
-          PROJECT="${{ steps.locate.outputs.project }}"
-
-          # Temp/Library are disposable Unity caches and caused the EACCES
-          # seen in v10 while upload-artifact tried to stat fsbankcache files.
-          sudo rm -rf \
-            "$PROJECT/Temp" \
-            "$PROJECT/Library" \
-            "$PROJECT/obj" \
-            2>/dev/null || true
-
-          sudo chown -R "$(id -u):$(id -g)" recovered-artifact || true
-          chmod -R u+rwX recovered-artifact || true
-
-      - name: Upload Unity failure project
-        if: steps.detect_xcode.outputs.ready != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: Sonic-P06-Sonic-Release-Unity-iOS-FAIL-v6
-          path: recovered-artifact
-          if-no-files-found: ignore
-          compression-level: 0
-
       - name: Show exact Unity failure
         if: always() && steps.detect_xcode.outputs.ready != 'true'
         run: |
           echo "=================================================="
-          echo "SONIC P-06 RELEASE v5 - EXACT UNITY FAILURE"
-          echo "Unity: ${{ needs.recover.outputs.unity_version }}"
+          echo "SONIC P-06 RELEASE v7 FAST - EXACT UNITY FAILURE"
+          echo "Unity: ${{ steps.prepare_ios.outputs.unity_version }}"
           echo "Attempt 1: ${{ steps.unity_build_1.outcome }} / engine=${{ steps.unity_build_1.outputs.engineExitCode }}"
           echo "Attempt 2: ${{ steps.unity_build_2.outcome }} / engine=${{ steps.unity_build_2.outputs.engineExitCode }}"
           echo "=================================================="
@@ -1548,21 +1475,18 @@ jobs:
           echo "Artifact: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v6"
           exit 1
 
-  package_unsigned_ipa:
-    name: Package unsigned IPA from Xcode output
-    needs: build_unity_ios
-    if: needs.build_unity_ios.outputs.xcode_ready == 'true'
+  make_ipa:
+    name: 2. Make Signulous IPA
+    needs: build_sonic_ios
+    if: needs.build_sonic_ios.outputs.xcode_ready == 'true'
     runs-on: macos-latest
     timeout-minutes: 60
 
     steps:
-      - name: Checkout for original APK icon
-        uses: actions/checkout@v4
-
       - name: Download Unity Xcode project
         uses: actions/download-artifact@v4
         with:
-          name: Sonic-2006-iOS-Xcode
+          name: Sonic-P06-iOS-Xcode-v7-FAST
           path: unity-ios
 
       - name: Patch old Unity 2018 headers for current Xcode
@@ -1579,88 +1503,17 @@ jobs:
                 fi
               done
 
-      - name: Restore Unity script permissions and replace app icon
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Restore Unity script permissions
         run: |
-          set -euo pipefail
-
-          echo "===== RESTORE UNITY SHELL SCRIPT EXECUTE BITS ====="
+          set -e
           find unity-ios -type f -name "*.sh" -print -exec chmod +x {} \;
-
-          echo "===== FIND ORIGINAL ANDROID APP ICON ====="
-          rm -rf icon-work
-          mkdir -p icon-work/android
-
-          APK=""
-
-          while IFS= read -r FILE; do
-            [ -z "$FILE" ] && continue
-            if unzip -l "$FILE" >/dev/null 2>&1; then
-              APK="$FILE"
-              break
-            fi
-          done < <(
-            find . -type f -iname "*.apk" -not -path "./unity-ios/*" | sort
-          )
-
-          if [ -z "$APK" ]; then
-            TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
-            if [ -n "$TAG" ]; then
-              gh release download "$TAG" \
-                --pattern "*.apk" \
-                --dir icon-work \
-                || true
-              APK=$(find icon-work -type f -iname "*.apk" | head -1 || true)
-            fi
-          fi
-
-          if [ -n "$APK" ]; then
-            unzip -q "$APK" -d icon-work/android
-
-            ICON=$(
-              find icon-work/android/res -type f \
-                \( -iname "*ic_launcher*.png" -o -iname "*app_icon*.png" \
-                   -o -iname "*icon*.png" \) \
-                -print0 2>/dev/null \
-                | xargs -0 ls -S 2>/dev/null \
-                | head -1
-            )
-
-            if [ -n "$ICON" ] && [ -f "$ICON" ]; then
-              echo "ICON_SOURCE=$ICON"
-
-              APPICON_DIR=$(find unity-ios -type d -name "AppIcon.appiconset" | head -1 || true)
-
-              if [ -n "$APPICON_DIR" ]; then
-                echo "APPICON_DIR=$APPICON_DIR"
-
-                # Replace every existing icon PNG at its original dimensions.
-                find "$APPICON_DIR" -type f -iname "*.png" -print \
-                  | while read -r OUT; do
-                      W=$(sips -g pixelWidth "$OUT" 2>/dev/null | awk '/pixelWidth/ {print $2}')
-                      H=$(sips -g pixelHeight "$OUT" 2>/dev/null | awk '/pixelHeight/ {print $2}')
-
-                      if [ -n "$W" ] && [ -n "$H" ]; then
-                        sips -z "$H" "$W" "$ICON" --out "$OUT" >/dev/null
-                        echo "Replaced icon: $OUT (${W}x${H})"
-                      fi
-                    done
-              else
-                echo "WARNING: AppIcon.appiconset not found; keeping Unity icon."
-              fi
-            else
-              echo "WARNING: Android app icon was not found."
-            fi
-          else
-            echo "WARNING: APK not found in repo/release; keeping Unity icon."
-          fi
+          xattr -cr unity-ios 2>/dev/null || true
 
       - name: Patch Xcode project for missing movies and modern Xcode
         run: |
           set -euo pipefail
 
-          echo "===== XCODE v6 PRECHECK ====="
+          echo "===== XCODE v7 FAST PRECHECK ====="
 
           PROJ=$(find unity-ios -type d -name "*.xcodeproj" | head -1)
           if [ -z "$PROJ" ]; then
@@ -1943,16 +1796,16 @@ jobs:
             --sequesterRsrc \
             --keepParent \
             Payload \
-            output/Sonic-P06-Sonic-Release-iOS-v6.ipa
+            output/Sonic-P06-Sonic-Release-iOS-v7-FAST.ipa
 
-          ls -lh output/Sonic-P06-Sonic-Release-iOS-v6.ipa
+          ls -lh output/Sonic-P06-Sonic-Release-iOS-v7-FAST.ipa
 
       - name: Upload Sonic iOS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-iOS-v6
+          name: Sonic-P06-Sonic-Release-iOS-v7-FAST
           path: |
-            output/Sonic-P06-Sonic-Release-iOS-v6.ipa
+            output/Sonic-P06-Sonic-Release-iOS-v7-FAST.ipa
             xcodebuild-attempt1.log
             xcodebuild-attempt2.log
             xcode-missing-movie-pbxrefs.txt
@@ -1963,7 +1816,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Xcode-FAIL-v6
+          name: Sonic-P06-Xcode-FAIL-v7-FAST
           path: |
             xcodebuild-attempt1.log
             xcodebuild-attempt2.log
@@ -1975,89 +1828,3 @@ jobs:
             xcode-missing-movie-pbxrefs.txt
           if-no-files-found: ignore
           compression-level: 0
-
-  capture_full_unity_log:
-    name: Capture full Unity crash log
-    needs: build_unity_ios
-    if: always() && needs.build_unity_ios.result == 'failure' && needs.build_unity_ios.outputs.xcode_ready != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    permissions:
-      contents: read
-      actions: read
-
-    steps:
-      - name: Download completed Unity job log
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -e
-          mkdir -p full-unity-log
-
-          echo "RUN_ID=$GITHUB_RUN_ID"
-          echo "REPOSITORY=$GITHUB_REPOSITORY"
-
-          JOB_ID=$(
-            gh api \
-              "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
-              --jq '.jobs[] | select(.name == "Setup + Activate + Build Unity iOS") | .id' \
-              | head -1
-          )
-
-          if [ -z "$JOB_ID" ]; then
-            echo "ERROR: Could not locate the completed Unity build job."
-            gh api \
-              "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
-              --jq '.jobs[] | [.id,.name,.status,.conclusion] | @tsv' \
-              | tee full-unity-log/jobs.txt
-            exit 1
-          fi
-
-          echo "UNITY_JOB_ID=$JOB_ID" | tee full-unity-log/job-id.txt
-
-          # Download as raw bytes. `gh api` can reject this log because it
-          # contains terminal escape sequences; curl does not.
-          HTTP_CODE=$(
-            curl \
-              --location \
-              --silent \
-              --show-error \
-              --fail-with-body \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              -o full-unity-log/Unity-build-job.log \
-              -w "%{http_code}" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/jobs/$JOB_ID/logs"
-          )
-
-          echo "HTTP_CODE=$HTTP_CODE" | tee full-unity-log/http.txt
-          test -s full-unity-log/Unity-build-job.log
-
-          echo "===== LOG SIZE ====="
-          wc -c full-unity-log/Unity-build-job.log
-          wc -l full-unity-log/Unity-build-job.log || true
-
-          echo "===== IMPORTANT LINES ====="
-          grep -a -niE \
-            'error CS[0-9]+|Scripts have compiler errors|Compilation failed|Aborting batchmode|SIGABRT|Caught fatal signal|Assertion failed|AudioManager|FMOD|Exception|Fatal error|Build failed|exit code 134|did the Editor crash|executeMethod class|langversion' \
-            full-unity-log/Unity-build-job.log \
-            | tail -500 \
-            | tee full-unity-log/important-errors.txt \
-            || true
-
-          echo "===== LAST 500 LINES ====="
-          tail -500 full-unity-log/Unity-build-job.log \
-            > full-unity-log/tail-500.txt \
-            || true
-
-      - name: Upload full Unity crash log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Sonic-P06-Sonic-Release-FULL-Unity-Log-v6
-          path: full-unity-log
-          if-no-files-found: warn
-          compression-level: 0
-
