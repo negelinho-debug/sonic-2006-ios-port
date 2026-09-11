@@ -1,4 +1,4 @@
-name: Sonic P-06 Sonic Release iOS - v4
+name: Sonic P-06 Sonic Release iOS - v5
 
 on:
   workflow_dispatch:
@@ -18,6 +18,10 @@ jobs:
     name: Recover Unity project
     runs-on: ubuntu-latest
     timeout-minutes: 90
+
+    outputs:
+      unity_version: ${{ steps.prepare_ios.outputs.unity_version }}
+      unity_changeset: ${{ steps.prepare_ios.outputs.unity_changeset }}
 
     steps:
       - name: Checkout
@@ -280,7 +284,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-APK-Inspection-v4
+          name: Sonic-P06-Sonic-Release-APK-Inspection-v5
           path: |
             output/apk-size.txt
             output/unzip-status.txt
@@ -601,6 +605,7 @@ jobs:
           echo "RECOVERED_PROJECT=$PROJECT"
 
       - name: Prepare recovered project for iOS
+        id: prepare_ios
         run: |
           set -e
 
@@ -653,17 +658,52 @@ jobs:
 
           mkdir -p "$PROJECT/ProjectSettings"
 
-          echo "===== RECOVERED PROJECT VERSION BEFORE COMPAT PATCH ====="
-          if [ -f "$PROJECT/ProjectSettings/ProjectVersion.txt" ]; then
-            cat "$PROJECT/ProjectSettings/ProjectVersion.txt"               | tee output/recovered-project-version-original.txt
+          VERSION_FILE="$PROJECT/ProjectSettings/ProjectVersion.txt"
+
+          echo "===== RECOVERED PROJECT VERSION ====="
+          if [ -f "$VERSION_FILE" ]; then
+            cat "$VERSION_FILE" | tee output/recovered-project-version-original.txt
           else
             echo "AssetRipper did not emit ProjectVersion.txt"               | tee output/recovered-project-version-original.txt
           fi
 
-          cat > "$PROJECT/ProjectSettings/ProjectVersion.txt" <<'EOF'
-          m_EditorVersion: 2018.2.0f2
-          m_EditorVersionWithRevision: 2018.2.0f2 (787658998520)
+          EDITOR_VERSION=""
+          CHANGESET=""
+
+          if [ -f "$VERSION_FILE" ]; then
+            EDITOR_VERSION=$(
+              sed -n 's/^[[:space:]]*m_EditorVersion:[[:space:]]*//p' "$VERSION_FILE"                 | head -1                 | tr -d '\r'
+            )
+
+            CHANGESET=$(
+              sed -n 's/.*m_EditorVersionWithRevision:.*(\([^)]*\)).*/\1/p' "$VERSION_FILE"                 | head -1                 | tr -d '\r'
+            )
+          fi
+
+          # Only use the old-demo editor as a fallback when AssetRipper gives us
+          # no usable version at all. The full Sonic Release may use another Unity.
+          if [ -z "$EDITOR_VERSION" ] || [ "$EDITOR_VERSION" = "UNKNOWN" ]; then
+            EDITOR_VERSION="2018.2.0f2"
+            CHANGESET="787658998520"
+
+            cat > "$VERSION_FILE" <<EOF
+          m_EditorVersion: $EDITOR_VERSION
+          m_EditorVersionWithRevision: $EDITOR_VERSION ($CHANGESET)
           EOF
+
+            echo "WARNING: Unity version was missing; using old-demo fallback $EDITOR_VERSION."
+          else
+            echo "Keeping AssetRipper recovered editor: $EDITOR_VERSION"
+          fi
+
+          echo "BUILD_UNITY_VERSION=$EDITOR_VERSION" | tee output/build-unity-version.txt
+          echo "BUILD_UNITY_CHANGESET=$CHANGESET" | tee -a output/build-unity-version.txt
+
+          echo "unity_version=$EDITOR_VERSION" >> "$GITHUB_OUTPUT"
+          echo "unity_changeset=$CHANGESET" >> "$GITHUB_OUTPUT"
+
+          echo "===== FINAL PROJECT VERSION FILE ====="
+          cat "$VERSION_FILE"
 
           echo "===== V16 FIX: UNITY 2018.2 C# COMPILER ====="
 
@@ -729,961 +769,28 @@ jobs:
             | head -250 \
             | tee output/touch-csharp-references.txt || true
 
-          echo "===== V24 CONTROLLER BACKEND DISCOVERY ====="
-          mkdir -p output
-          : > output/v24-controller-backends.txt
-
-          grep -RniE             "XInputDotNetPure|GamePad\\.GetState|GamePadState|PlayerIndex|XInput|Rewired|InControl|ControllerInput|InputManager|Joystick|Gamepad"             "$PROJECT/Assets/Scripts" "$PROJECT/Assets"             --include="*.cs"             2>/dev/null             | head -500             | tee output/v24-controller-backends.txt || true
-
-          echo "===== V24 FIX: IOS TOUCH / BUTTON INPUT ====="
-          mkdir -p output
-          : > output/v24-input-patched-files.txt
-
-          # 1) Re-enable mobile code that was Android-gated in recovered sources.
-          # 2) Route Unity Input button/key/axis reads through an iOS touch bridge.
-          PROJECT="$PROJECT" python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          project = Path(os.environ["PROJECT"])
-          root = project / "Assets" / "Scripts" / "Assembly-CSharp"
-          report = Path("output/v24-input-patched-files.txt")
-
-          if not root.exists():
-              root = project / "Assets"
-
-          markers = re.compile(
-              r"VirtualJoystick|Touch|AButton|BButton|XButton|YButton|"
-              r"StartButton|BackButton|GameInput|Input\.GetButton|Input\.GetAxis|"
-              r"Input\.GetKey|RuntimePlatform\.Android|UNITY_ANDROID",
-              re.I,
-          )
-
-          api_calls = [
-              "GetButtonDown", "GetButtonUp", "GetButton",
-              "GetAxisRaw", "GetAxis",
-              "GetKeyDown", "GetKeyUp", "GetKey",
-          ]
-
-          changed = []
-
-          xinput_refs = []
-          for probe in root.rglob("*.cs"):
-              try:
-                  probe_text = probe.read_text(encoding="utf-8", errors="ignore")
-              except Exception:
-                  continue
-              if ("XInputDotNetPure" in probe_text or
-                  "GamePad.GetState" in probe_text or
-                  "GamePadState" in probe_text or
-                  "PlayerIndex" in probe_text):
-                  xinput_refs.append(str(probe))
-
-          Path("output/v24-xinput-source-files.txt").write_text(
-              "\n".join(xinput_refs) + ("\n" if xinput_refs else "")
-          )
-          print("XInput-looking source files:", len(xinput_refs))
-
-          for path in root.rglob("*.cs"):
-              if path.name in {"IOSInputBridge.cs"}:
-                  continue
-
-              try:
-                  original = path.read_text(encoding="utf-8", errors="ignore")
-              except Exception:
-                  continue
-
-              s = original
-
-              # Sonic 06 PC-style conversions commonly use XInputDotNetPure
-              # instead of UnityEngine.Input. Route GamePad calls to our iOS
-              # controller shim while preserving the original GamePadState API.
-              if ("XInputDotNetPure" in original or
-                  "GamePad.GetState" in original or
-                  "GamePadState" in original or
-                  "PlayerIndex" in original):
-                  s = re.sub(
-                      r"XInputDotNetPure\.GamePad\.GetState\s*\(",
-                      "IOSXInputGamePad.GetState(",
-                      s,
-                  )
-                  s = re.sub(
-                      r"(?<![\w.])GamePad\.GetState\s*\(",
-                      "IOSXInputGamePad.GetState(",
-                      s,
-                  )
-                  s = re.sub(
-                      r"XInputDotNetPure\.GamePad\.SetVibration\s*\(",
-                      "IOSXInputGamePad.SetVibration(",
-                      s,
-                  )
-                  s = re.sub(
-                      r"(?<![\w.])GamePad\.SetVibration\s*\(",
-                      "IOSXInputGamePad.SetVibration(",
-                      s,
-                  )
-
-              # Route classic Unity input through the bridge. The bridge always
-              # delegates to the original Unity Input first, so keyboard/gamepad
-              # behaviour remains available.
-              for name in api_calls:
-                  s = re.sub(
-                      rf"UnityEngine\.Input\.{name}\s*\(",
-                      f"IOSInputBridge.{name}(",
-                      s,
-                  )
-                  s = re.sub(
-                      rf"(?<![\w.])Input\.{name}\s*\(",
-                      f"IOSInputBridge.{name}(",
-                      s,
-                  )
-
-              s = re.sub(
-                  r"(?<![\w.])Input\.anyKeyDown\b",
-                  "IOSInputBridge.AnyKeyDown",
-                  s,
-              )
-              s = re.sub(
-                  r"UnityEngine\.Input\.anyKeyDown\b",
-                  "IOSInputBridge.AnyKeyDown",
-                  s,
-              )
-
-              if markers.search(original):
-                  # The original mobile conversion contains Android-only
-                  # platform gates. Treat iPhonePlayer as the same mobile path.
-                  s = re.sub(
-                      r"Application\.platform\s*==\s*RuntimePlatform\.Android",
-                      "(Application.platform == RuntimePlatform.Android || "
-                      "Application.platform == RuntimePlatform.IPhonePlayer)",
-                      s,
-                  )
-                  s = re.sub(
-                      r"RuntimePlatform\.Android\s*==\s*Application\.platform",
-                      "(Application.platform == RuntimePlatform.Android || "
-                      "Application.platform == RuntimePlatform.IPhonePlayer)",
-                      s,
-                  )
-                  s = re.sub(
-                      r"Application\.platform\s*!=\s*RuntimePlatform\.Android",
-                      "(Application.platform != RuntimePlatform.Android && "
-                      "Application.platform != RuntimePlatform.IPhonePlayer)",
-                      s,
-                  )
-
-                  # Only widen UNITY_ANDROID blocks that do not use AndroidJava;
-                  # Android Java APIs themselves cannot exist on iOS.
-                  if "AndroidJava" not in original:
-                      s = re.sub(
-                          r"(?m)^(\s*)#if\s+UNITY_ANDROID\s*$",
-                          r"\1#if UNITY_ANDROID || UNITY_IOS",
-                          s,
-                      )
-                      s = re.sub(
-                          r"(?m)^(\s*)#elif\s+UNITY_ANDROID\s*$",
-                          r"\1#elif UNITY_ANDROID || UNITY_IOS",
-                          s,
-                      )
-
-              if s != original:
-                  path.write_text(s, encoding="utf-8")
-                  changed.append(str(path))
-
-          report.write_text("\n".join(changed) + ("\n" if changed else ""))
-          print("Patched input files:", len(changed))
-          for p in changed[:120]:
-              print(p)
-          PY
-
-          cat > "$PROJECT/Assets/Scripts/Assembly-CSharp/IOSInputBridge.cs" <<'CS'
-          using System;
-          using UnityEngine;
-          using UnityEngine.EventSystems;
-          using UnityEngine.SceneManagement;
-          using UnityEngine.UI;
-
-          public static class IOSInputBridge
-          {
-              internal static bool ADown, AHeld, AUp;
-              internal static bool BDown, BHeld, BUp;
-              internal static bool XDown, XHeld, XUp;
-              internal static bool YDown, YHeld, YUp;
-              internal static bool StartDown, StartHeld, StartUp;
-              internal static Vector2 LeftStick;
-              internal static Vector2 RightStick;
-
-              [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
-              private static void Boot()
-              {
-                  Input.simulateMouseWithTouches = true;
-
-                  if (UnityEngine.Object.FindObjectOfType<IOSInputBridgeDriver>() == null)
-                  {
-                      GameObject go = new GameObject("IOSInputBridge");
-                      UnityEngine.Object.DontDestroyOnLoad(go);
-                      go.AddComponent<IOSInputBridgeDriver>();
-                  }
-              }
-
-              private static string Norm(string name)
-              {
-                  if (String.IsNullOrEmpty(name)) return "";
-                  return name.ToLowerInvariant()
-                      .Replace(" ", "")
-                      .Replace("_", "")
-                      .Replace("-", "");
-              }
-
-              private static bool IsA(string n)
-              {
-                  return n == "a" || n == "jump" || n == "accept" ||
-                         n == "submit" || n == "fire1" || n == "button0" ||
-                         n == "cross" || n == "joystickbutton0";
-              }
-
-              private static bool IsB(string n)
-              {
-                  return n == "b" || n == "cancel" || n == "back" ||
-                         n == "fire2" || n == "button1" || n == "circle" ||
-                         n == "joystickbutton1";
-              }
-
-              private static bool IsX(string n)
-              {
-                  return n == "x" || n == "attack" || n == "action" ||
-                         n == "fire3" || n == "button2" ||
-                         n == "joystickbutton2";
-              }
-
-              private static bool IsY(string n)
-              {
-                  return n == "y" || n == "special" || n == "secondary" ||
-                         n == "button3" || n == "joystickbutton3";
-              }
-
-              private static bool IsStart(string n)
-              {
-                  return n == "start" || n == "pause" || n == "menu" ||
-                         n == "startbutton" || n == "joystickbutton7";
-              }
-
-              public static bool AnyKeyDown
-              {
-                  get { return Input.anyKeyDown || ADown || BDown || XDown || YDown || StartDown; }
-              }
-
-              public static bool GetButtonDown(string name)
-              {
-                  bool native = false;
-                  try { native = Input.GetButtonDown(name); } catch {}
-                  if (native) return true;
-
-                  string n = Norm(name);
-                  if (IsA(n)) return ADown;
-                  if (IsB(n)) return BDown;
-                  if (IsX(n)) return XDown;
-                  if (IsY(n)) return YDown;
-                  if (IsStart(n)) return StartDown;
-                  return false;
-              }
-
-              public static bool GetButton(string name)
-              {
-                  bool native = false;
-                  try { native = Input.GetButton(name); } catch {}
-                  if (native) return true;
-
-                  string n = Norm(name);
-                  if (IsA(n)) return AHeld;
-                  if (IsB(n)) return BHeld;
-                  if (IsX(n)) return XHeld;
-                  if (IsY(n)) return YHeld;
-                  if (IsStart(n)) return StartHeld;
-                  return false;
-              }
-
-              public static bool GetButtonUp(string name)
-              {
-                  bool native = false;
-                  try { native = Input.GetButtonUp(name); } catch {}
-                  if (native) return true;
-
-                  string n = Norm(name);
-                  if (IsA(n)) return AUp;
-                  if (IsB(n)) return BUp;
-                  if (IsX(n)) return XUp;
-                  if (IsY(n)) return YUp;
-                  if (IsStart(n)) return StartUp;
-                  return false;
-              }
-
-              public static bool GetKeyDown(KeyCode key)
-              {
-                  if (Input.GetKeyDown(key)) return true;
-                  if (key == KeyCode.Space || key == KeyCode.JoystickButton0) return ADown;
-                  if (key == KeyCode.Escape || key == KeyCode.JoystickButton1) return BDown;
-                  if (key == KeyCode.JoystickButton2) return XDown;
-                  if (key == KeyCode.JoystickButton3) return YDown;
-                  if (key == KeyCode.Return || key == KeyCode.KeypadEnter || key == KeyCode.JoystickButton7) return StartDown;
-                  return false;
-              }
-
-              public static bool GetKey(KeyCode key)
-              {
-                  if (Input.GetKey(key)) return true;
-                  if (key == KeyCode.Space || key == KeyCode.JoystickButton0) return AHeld;
-                  if (key == KeyCode.Escape || key == KeyCode.JoystickButton1) return BHeld;
-                  if (key == KeyCode.JoystickButton2) return XHeld;
-                  if (key == KeyCode.JoystickButton3) return YHeld;
-                  if (key == KeyCode.Return || key == KeyCode.KeypadEnter || key == KeyCode.JoystickButton7) return StartHeld;
-                  return false;
-              }
-
-              public static bool GetKeyUp(KeyCode key)
-              {
-                  if (Input.GetKeyUp(key)) return true;
-                  if (key == KeyCode.Space || key == KeyCode.JoystickButton0) return AUp;
-                  if (key == KeyCode.Escape || key == KeyCode.JoystickButton1) return BUp;
-                  if (key == KeyCode.JoystickButton2) return XUp;
-                  if (key == KeyCode.JoystickButton3) return YUp;
-                  if (key == KeyCode.Return || key == KeyCode.KeypadEnter || key == KeyCode.JoystickButton7) return StartUp;
-                  return false;
-              }
-
-              public static float GetAxis(string name)
-              {
-                  float native = 0f;
-                  try { native = Input.GetAxis(name); } catch {}
-                  if (Mathf.Abs(native) > 0.01f) return native;
-
-                  string n = Norm(name);
-                  if (n == "horizontal" || n == "leftstickx" || n == "movehorizontal")
-                      return LeftStick.x;
-                  if (n == "vertical" || n == "leftsticky" || n == "movevertical")
-                      return LeftStick.y;
-
-                  return native;
-              }
-
-              public static float GetAxisRaw(string name)
-              {
-                  float native = 0f;
-                  try { native = Input.GetAxisRaw(name); } catch {}
-                  if (Mathf.Abs(native) > 0.01f) return native;
-
-                  string n = Norm(name);
-                  if (n == "horizontal" || n == "leftstickx" || n == "movehorizontal")
-                      return LeftStick.x;
-                  if (n == "vertical" || n == "leftsticky" || n == "movevertical")
-                      return LeftStick.y;
-
-                  return native;
-              }
-          }
-
-          [DefaultExecutionOrder(-10000)]
-          public sealed class IOSInputBridgeDriver : MonoBehaviour
-          {
-              private int stickFinger = -1;
-              private Vector2 stickOrigin;
-              private float nextVisualFix;
-              private float suppressStartUntil;
-              private bool titleStartArmed = true;
-              private GUIStyle touchLabelStyle;
-
-              private void Awake()
-              {
-                  DontDestroyOnLoad(gameObject);
-                  Input.simulateMouseWithTouches = true;
-                  EnsureEventSystem();
-                  FixBrokenTitleTextures();
-                  SceneManager.sceneLoaded += OnSceneLoaded;
-              }
-
-              private void OnDestroy()
-              {
-                  SceneManager.sceneLoaded -= OnSceneLoaded;
-              }
-
-              private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
-              {
-                  IOSInputBridge.ADown = IOSInputBridge.AHeld = IOSInputBridge.AUp = false;
-                  IOSInputBridge.BDown = IOSInputBridge.BHeld = IOSInputBridge.BUp = false;
-                  IOSInputBridge.XDown = IOSInputBridge.XHeld = IOSInputBridge.XUp = false;
-                  IOSInputBridge.YDown = IOSInputBridge.YHeld = IOSInputBridge.YUp = false;
-                  IOSInputBridge.StartDown = IOSInputBridge.StartHeld = IOSInputBridge.StartUp = false;
-                  IOSInputBridge.LeftStick = Vector2.zero;
-                  IOSInputBridge.RightStick = Vector2.zero;
-                  stickFinger = -1;
-                  suppressStartUntil = Time.unscaledTime + 0.65f;
-
-                  EnsureEventSystem();
-                  FixBrokenTitleTextures();
-              }
-
-              private void Update()
-              {
-                  IOSInputBridge.ADown = false;
-                  IOSInputBridge.AUp = false;
-                  IOSInputBridge.BDown = false;
-                  IOSInputBridge.BUp = false;
-                  IOSInputBridge.XDown = false;
-                  IOSInputBridge.XUp = false;
-                  IOSInputBridge.YDown = false;
-                  IOSInputBridge.YUp = false;
-                  IOSInputBridge.StartDown = false;
-                  IOSInputBridge.StartUp = false;
-
-                  bool aHeld = false;
-                  bool bHeld = false;
-                  bool xHeld = false;
-                  bool yHeld = false;
-                  bool startHeld = false;
-                  Vector2 stick = Vector2.zero;
-
-                  float w = Mathf.Max(1f, Screen.width);
-                  float h = Mathf.Max(1f, Screen.height);
-                  float unit = Mathf.Min(w, h);
-
-                  for (int i = 0; i < Input.touchCount; i++)
-                  {
-                      Touch t = Input.GetTouch(i);
-                      Vector2 p = t.position;
-
-                      Vector2 aCenter = new Vector2(w * 0.73f, h * 0.18f);
-                      Vector2 bCenter = new Vector2(w * 0.79f, h * 0.36f);
-                      Vector2 xCenter = new Vector2(w * 0.66f, h * 0.29f);
-                      Vector2 yCenter = new Vector2(w * 0.72f, h * 0.47f);
-                      Vector2 startCenter = new Vector2(w * 0.92f, h * 0.90f);
-
-                      bool inA = Vector2.Distance(p, aCenter) < unit * 0.13f;
-                      bool inB = Vector2.Distance(p, bCenter) < unit * 0.13f;
-                      bool inX = Vector2.Distance(p, xCenter) < unit * 0.12f;
-                      bool inY = Vector2.Distance(p, yCenter) < unit * 0.12f;
-                      bool inPauseButton = Vector2.Distance(p, startCenter) < unit * 0.10f;
-
-                      bool inTitleStart =
-                          titleStartArmed &&
-                          p.x > w * 0.36f && p.x < w * 0.64f &&
-                          p.y > h * 0.34f && p.y < h * 0.66f;
-                      bool inStart = inPauseButton || inTitleStart;
-
-                      if (inA)
-                      {
-                          aHeld = t.phase != TouchPhase.Ended && t.phase != TouchPhase.Canceled;
-                          if (t.phase == TouchPhase.Began) IOSInputBridge.ADown = true;
-                          if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
-                              IOSInputBridge.AUp = true;
-                      }
-                      else if (inB)
-                      {
-                          bHeld = t.phase != TouchPhase.Ended && t.phase != TouchPhase.Canceled;
-                          if (t.phase == TouchPhase.Began) IOSInputBridge.BDown = true;
-                          if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
-                              IOSInputBridge.BUp = true;
-                      }
-                      else if (inX)
-                      {
-                          xHeld = t.phase != TouchPhase.Ended && t.phase != TouchPhase.Canceled;
-                          if (t.phase == TouchPhase.Began) IOSInputBridge.XDown = true;
-                          if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
-                              IOSInputBridge.XUp = true;
-                      }
-                      else if (inY)
-                      {
-                          yHeld = t.phase != TouchPhase.Ended && t.phase != TouchPhase.Canceled;
-                          if (t.phase == TouchPhase.Began) IOSInputBridge.YDown = true;
-                          if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
-                              IOSInputBridge.YUp = true;
-                      }
-                      else if (inStart)
-                      {
-                          startHeld = false;
-                          if (Time.unscaledTime >= suppressStartUntil &&
-                              t.phase == TouchPhase.Began)
-                          {
-                              IOSInputBridge.StartDown = true;
-                              if (inTitleStart)
-                                  titleStartArmed = false;
-                              suppressStartUntil = Time.unscaledTime + 0.40f;
-                          }
-                          if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
-                              IOSInputBridge.StartUp = true;
-                      }
-
-                      // Left half / lower half = virtual movement stick.
-                      if (p.x < w * 0.46f && p.y < h * 0.58f)
-                      {
-                          if (stickFinger == -1 && t.phase == TouchPhase.Began)
-                          {
-                              stickFinger = t.fingerId;
-                              stickOrigin = p;
-                          }
-
-                          if (t.fingerId == stickFinger)
-                          {
-                              if (t.phase == TouchPhase.Ended || t.phase == TouchPhase.Canceled)
-                              {
-                                  stickFinger = -1;
-                              }
-                              else
-                              {
-                                  float radius = unit * 0.16f;
-                                  stick = Vector2.ClampMagnitude((p - stickOrigin) / radius, 1f);
-                              }
-                          }
-                      }
-                  }
-
-                  IOSInputBridge.AHeld = aHeld;
-                  IOSInputBridge.BHeld = bHeld;
-                  IOSInputBridge.XHeld = xHeld;
-                  IOSInputBridge.YHeld = yHeld;
-                  IOSInputBridge.StartHeld = startHeld;
-                  IOSInputBridge.LeftStick = stick;
-
-                  if (Time.unscaledTime >= nextVisualFix)
-                  {
-                      nextVisualFix = Time.unscaledTime + 2f;
-                      EnsureEventSystem();
-                      FixBrokenTitleTextures();
-                  }
-              }
-
-              // v24: do not draw our temporary X/Y/II overlay.
-              // Let the recovered game's own mobile UI be visible.
-              private void OnGUI()
-              {
-              }
-
-              private static void EnsureEventSystem()
-              {
-                  EventSystem es = FindObjectOfType<EventSystem>();
-
-                  if (es == null)
-                  {
-                      GameObject go = new GameObject("EventSystem_iOS");
-                      es = go.AddComponent<EventSystem>();
-                      go.AddComponent<StandaloneInputModule>();
-                  }
-                  else
-                  {
-                      es.enabled = true;
-                      BaseInputModule[] modules = es.GetComponents<BaseInputModule>();
-
-                      if (modules == null || modules.Length == 0)
-                          es.gameObject.AddComponent<StandaloneInputModule>();
-                      else
-                          for (int i = 0; i < modules.Length; i++)
-                              modules[i].enabled = true;
-                  }
-              }
-
-              private static bool LooksLikeTitleUI(string name)
-              {
-                  if (String.IsNullOrEmpty(name)) return false;
-                  string n = name.ToLowerInvariant();
-
-                  return n.Contains("sonic") || n.Contains("title") ||
-                         n.Contains("logo") || n.Contains("menu") ||
-                         n.Contains("loading") || n.Contains("splash") ||
-                         n.Contains("background") || n.Contains("sega");
-              }
-
-              private static void FixBrokenTitleTextures()
-              {
-                  RawImage[] raws = Resources.FindObjectsOfTypeAll<RawImage>();
-
-                  for (int i = 0; i < raws.Length; i++)
-                  {
-                      RawImage r = raws[i];
-                      if (r == null || !LooksLikeTitleUI(r.name)) continue;
-
-                      if (r.texture != null)
-                          r.texture.wrapMode = TextureWrapMode.Clamp;
-
-                      r.uvRect = new Rect(0f, 0f, 1f, 1f);
-                  }
-
-                  Image[] images = Resources.FindObjectsOfTypeAll<Image>();
-
-                  for (int i = 0; i < images.Length; i++)
-                  {
-                      Image img = images[i];
-                      if (img == null || !LooksLikeTitleUI(img.name)) continue;
-
-                      if (img.sprite != null && img.sprite.texture != null)
-                          img.sprite.texture.wrapMode = TextureWrapMode.Clamp;
-                  }
-
-                  Renderer[] renderers = Resources.FindObjectsOfTypeAll<Renderer>();
-
-                  for (int i = 0; i < renderers.Length; i++)
-                  {
-                      Renderer r = renderers[i];
-                      if (r == null || !LooksLikeTitleUI(r.name)) continue;
-
-                      Material[] mats = r.sharedMaterials;
-                      if (mats == null) continue;
-
-                      for (int m = 0; m < mats.Length; m++)
-                      {
-                          Material mat = mats[m];
-                          if (mat == null || mat.mainTexture == null) continue;
-
-                          mat.mainTexture.wrapMode = TextureWrapMode.Clamp;
-                          mat.mainTextureScale = Vector2.one;
-                          mat.mainTextureOffset = Vector2.zero;
-                      }
-                  }
-              }
-          }
-          CS
-
-          echo "===== V24 XINPUTDOTNETPURE IOS SHIM ====="
-
-          XINPUT_MANAGED=$(find "$PROJECT/Assets" -type f -iname "XInputDotNetPure.dll" -print -quit || true)
-          XINPUT_SOURCE_REFS=$(wc -l < output/v24-xinput-source-files.txt 2>/dev/null || echo 0)
-
-          # XInputInterface.dll is the Windows native bridge. It can never run on
-          # iPhone; our C# shim replaces calls before runtime.
+          echo "===== V5 CLEAN SONIC RELEASE INPUT DISCOVERY ====="
+          : > output/controller-backends-clean.txt
+
+          grep -RniE \
+            "XInputDotNetPure|GamePad\\.GetState|GamePadState|PlayerIndex|XInput|Rewired|InControl|ControllerInput|InputManager|Joystick|Gamepad|Touch|VirtualJoystick" \
+            "$PROJECT/Assets" \
+            --include="*.cs" \
+            2>/dev/null \
+            | head -800 \
+            | tee output/controller-backends-clean.txt || true
+
+          # IMPORTANT: this is a different, fuller Android release.
+          # Do NOT inject the old demo's IOSInputBridge / XInput shim / Basic Controls
+          # hider before we have one clean iOS compile.
           find "$PROJECT/Assets" -type f \
-            \( -iname "XInputInterface.dll" -o -iname "XInputInterface.dll.meta" \) \
-            -print | tee output/v24-removed-windows-xinput-interface.txt || true
-          find "$PROJECT/Assets" -type f \
-            \( -iname "XInputInterface.dll" -o -iname "XInputInterface.dll.meta" \) \
-            -delete || true
+            \( -name "IOSInputBridge.cs" \
+               -o -name "IOSXInputGamePad.cs" \
+               -o -name "IOSNativeMobileUICleaner.cs" \) \
+            -print -delete 2>/dev/null || true
 
-          if [ -n "$XINPUT_MANAGED" ] && [ "$XINPUT_SOURCE_REFS" -gt 0 ]; then
-            echo "Detected XInputDotNetPure: $XINPUT_MANAGED"
-            echo "Creating iOS GamePad.GetState replacement."
+          echo "V5 clean build: no old-demo touch/UI scripts injected."
 
-            cat > "$PROJECT/Assets/Scripts/Assembly-CSharp/IOSXInputGamePad.cs" <<'CS'
-          using System;
-          using System.Reflection;
-          using UnityEngine;
-          using XInputDotNetPure;
-
-          // Keeps the original XInputDotNetPure GamePadState/Buttons API used
-          // by recovered Sonic scripts, but fills it from our touch controls
-          // instead of calling the Windows-only XInputInterface.dll.
-          public static class IOSXInputGamePad
-          {
-              private static readonly BindingFlags BF =
-                  BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-
-              private static object Make(Type t)
-              {
-                  return Activator.CreateInstance(t);
-              }
-
-              private static void Set(object boxed, string field, object value)
-              {
-                  FieldInfo f = boxed.GetType().GetField(field, BF);
-                  if (f != null) f.SetValue(boxed, value);
-              }
-
-              private static ButtonState BS(bool value)
-              {
-                  return value ? ButtonState.Pressed : ButtonState.Released;
-              }
-
-              public static GamePadState GetState(PlayerIndex playerIndex)
-              {
-                  return BuildState();
-              }
-
-              public static GamePadState GetState(PlayerIndex playerIndex, GamePadDeadZone deadZone)
-              {
-                  return BuildState();
-              }
-
-              public static void SetVibration(PlayerIndex playerIndex, float leftMotor, float rightMotor)
-              {
-                  // No-op on iPhone.
-              }
-
-              private static GamePadState BuildState()
-              {
-                  // BUTTONS
-                  object buttons = Make(typeof(GamePadButtons));
-                  Set(buttons, "start", BS(IOSInputBridge.StartHeld || IOSInputBridge.StartDown));
-                  Set(buttons, "back", BS(IOSInputBridge.BHeld || IOSInputBridge.BDown));
-                  Set(buttons, "leftStick", ButtonState.Released);
-                  Set(buttons, "rightStick", ButtonState.Released);
-                  Set(buttons, "leftShoulder", ButtonState.Released);
-                  Set(buttons, "rightShoulder", ButtonState.Released);
-                  Set(buttons, "guide", ButtonState.Released);
-                  Set(buttons, "a", BS(IOSInputBridge.AHeld || IOSInputBridge.ADown));
-                  Set(buttons, "b", BS(IOSInputBridge.BHeld || IOSInputBridge.BDown));
-                  Set(buttons, "x", BS(IOSInputBridge.XHeld || IOSInputBridge.XDown));
-                  Set(buttons, "y", BS(IOSInputBridge.YHeld || IOSInputBridge.YDown));
-
-                  // D-PAD mirrors the left touch stick. This is important for
-                  // menus that read DPad instead of ThumbSticks.
-                  Vector2 ls = IOSInputBridge.LeftStick;
-                  object dpad = Make(typeof(GamePadDPad));
-                  Set(dpad, "up", BS(ls.y > 0.40f));
-                  Set(dpad, "down", BS(ls.y < -0.40f));
-                  Set(dpad, "left", BS(ls.x < -0.40f));
-                  Set(dpad, "right", BS(ls.x > 0.40f));
-
-                  // STICKS
-                  Type stickType = typeof(GamePadThumbSticks).GetNestedType("StickValue", BF);
-                  object leftStick = Make(stickType);
-                  object rightStick = Make(stickType);
-                  Set(leftStick, "x", Mathf.Clamp(ls.x, -1f, 1f));
-                  Set(leftStick, "y", Mathf.Clamp(ls.y, -1f, 1f));
-
-                  Vector2 rs = IOSInputBridge.RightStick;
-                  Set(rightStick, "x", Mathf.Clamp(rs.x, -1f, 1f));
-                  Set(rightStick, "y", Mathf.Clamp(rs.y, -1f, 1f));
-
-                  object sticks = Make(typeof(GamePadThumbSticks));
-                  Set(sticks, "left", leftStick);
-                  Set(sticks, "right", rightStick);
-
-                  // TRIGGERS
-                  object triggers = Make(typeof(GamePadTriggers));
-                  Set(triggers, "left", 0f);
-                  Set(triggers, "right", 0f);
-
-                  // GAMEPAD STATE
-                  object state = Make(typeof(GamePadState));
-                  Set(state, "isConnected", true);
-                  Set(state, "packetNumber", (uint)Time.frameCount);
-                  Set(state, "buttons", buttons);
-                  Set(state, "dPad", dpad);
-                  Set(state, "thumbSticks", sticks);
-                  Set(state, "triggers", triggers);
-
-                  return (GamePadState)state;
-              }
-          }
-          CS
-          else
-            echo "XInputDotNetPure managed DLL/source combo not detected."
-            echo "v23-controller-backends.txt will show which backend Sonic uses."
-          fi
-
-          echo "===== V24 HIDE BASIC CONTROLS OVERLAY ====="
-
-          cat > "$PROJECT/Assets/Scripts/Assembly-CSharp/IOSNativeMobileUICleaner.cs" <<'CS'
-          using System;
-          using System.Collections;
-          using System.Collections.Generic;
-          using UnityEngine;
-          using UnityEngine.SceneManagement;
-          using UnityEngine.UI;
-
-          public sealed class IOSNativeMobileUICleaner : MonoBehaviour
-          {
-              private static IOSNativeMobileUICleaner instance;
-
-              [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
-              private static void Boot()
-              {
-                  if (instance != null) return;
-
-                  GameObject go = new GameObject("IOSNativeMobileUICleaner_v24");
-                  DontDestroyOnLoad(go);
-                  instance = go.AddComponent<IOSNativeMobileUICleaner>();
-              }
-
-              private void Awake()
-              {
-                  SceneManager.sceneLoaded += OnSceneLoaded;
-                  StartCoroutine(CleanSeveralFrames());
-              }
-
-              private void OnDestroy()
-              {
-                  SceneManager.sceneLoaded -= OnSceneLoaded;
-              }
-
-              private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
-              {
-                  StartCoroutine(CleanSeveralFrames());
-              }
-
-              private IEnumerator CleanSeveralFrames()
-              {
-                  for (int i = 0; i < 12; i++)
-                  {
-                      yield return null;
-                      HideBasicControlsHelp();
-                  }
-
-                  yield return new WaitForSecondsRealtime(0.25f);
-                  HideBasicControlsHelp();
-                  yield return new WaitForSecondsRealtime(0.75f);
-                  HideBasicControlsHelp();
-              }
-
-              private static string Norm(string s)
-              {
-                  return string.IsNullOrEmpty(s)
-                      ? ""
-                      : s.Replace("_", " ").Replace("-", " ").Trim().ToLowerInvariant();
-              }
-
-              private static bool LooksLikeBasicControlsLabel(string s)
-              {
-                  string n = Norm(s);
-                  return n.Contains("basic controls") ||
-                         n.Contains("basic control") ||
-                         n.Contains("controller help") ||
-                         n.Contains("control guide") ||
-                         n.Contains("controls guide");
-              }
-
-              private static bool LooksLikeHelpPanelName(string s)
-              {
-                  string n = Norm(s);
-
-                  if (n.Contains("basic controls") || n.Contains("basic control"))
-                      return true;
-
-                  bool controls =
-                      n.Contains("control") || n.Contains("controller");
-                  bool help =
-                      n.Contains("help") || n.Contains("guide") ||
-                      n.Contains("tutorial") || n.Contains("manual");
-
-                  return controls && help;
-              }
-
-              private static void StopBlocking(GameObject go)
-              {
-                  if (go == null) return;
-
-                  CanvasGroup cg = go.GetComponent<CanvasGroup>();
-                  if (cg == null)
-                      cg = go.AddComponent<CanvasGroup>();
-
-                  cg.alpha = 0f;
-                  cg.interactable = false;
-                  cg.blocksRaycasts = false;
-              }
-
-              private static GameObject PickPanelRoot(Transform t)
-              {
-                  if (t == null) return null;
-
-                  Transform candidate = t;
-
-                  for (int depth = 0; depth < 5 && candidate != null; depth++)
-                  {
-                      if (LooksLikeHelpPanelName(candidate.name))
-                          return candidate.gameObject;
-
-                      Transform parent = candidate.parent;
-                      if (parent == null || parent.GetComponent<Canvas>() != null)
-                          break;
-
-                      candidate = parent;
-                  }
-
-                  candidate = t;
-                  for (int depth = 0; depth < 2; depth++)
-                  {
-                      if (candidate.parent == null ||
-                          candidate.parent.GetComponent<Canvas>() != null)
-                          break;
-                      candidate = candidate.parent;
-                  }
-
-                  return candidate.gameObject;
-              }
-
-              private static void HideBasicControlsHelp()
-              {
-                  HashSet<GameObject> hide = new HashSet<GameObject>();
-
-                  GameObject[] all = Resources.FindObjectsOfTypeAll<GameObject>();
-                  foreach (GameObject go in all)
-                  {
-                      if (go == null || !go.scene.IsValid())
-                          continue;
-
-                      if (LooksLikeHelpPanelName(go.name))
-                          hide.Add(go);
-                  }
-
-                  Text[] labels = Resources.FindObjectsOfTypeAll<Text>();
-                  foreach (Text label in labels)
-                  {
-                      if (label == null || label.gameObject == null ||
-                          !label.gameObject.scene.IsValid())
-                          continue;
-
-                      if (LooksLikeBasicControlsLabel(label.text))
-                      {
-                          GameObject root = PickPanelRoot(label.transform);
-                          if (root != null)
-                              hide.Add(root);
-                      }
-                  }
-
-                  foreach (GameObject go in hide)
-                  {
-                      if (go == null) continue;
-
-                      if (go.GetComponent<Canvas>() != null)
-                      {
-                          StopBlocking(go);
-                          continue;
-                      }
-
-                      StopBlocking(go);
-                      go.SetActive(false);
-                      Debug.Log("[v24] Hidden Basic Controls/help overlay: " + go.name);
-                  }
-              }
-          }
-          CS
-
-          echo "Created IOSNativeMobileUICleaner.cs"
-
-          echo "===== V24 INPUT PATCH REPORT ====="
-          wc -l output/v24-input-patched-files.txt || true
-          head -120 output/v24-input-patched-files.txt || true
-
-          echo "===== V24 FIX: CLAMP MENU / LOGO / LOADING TEXTURES ====="
-          : > output/v24-clamped-ui-textures.txt
-
-          # The current iOS build shows the SONIC title texture tiled across
-          # the whole screen. AssetRipper can restore some UI textures with
-          # Repeat wrapping. Clamp likely UI/title textures before Unity import.
-          while IFS= read -r IMG; do
-            META="$IMG.meta"
-            [ -f "$META" ] || continue
-
-            case "$(echo "$IMG" | tr '[:upper:]' '[:lower:]')" in
-              *logo*|*title*|*loading*|*control*|*menu*|*splash*|*background*|*/bg_*|*_bg.*|*sega*)
-                if grep -qE '^[[:space:]]*wrapMode:[[:space:]]*0([[:space:]]|$)' "$META"; then
-                  sed -Ei 's/^([[:space:]]*wrapMode:)[[:space:]]*0([[:space:]]*)$/\1 1\2/' "$META"
-                  echo "$IMG" >> output/v24-clamped-ui-textures.txt
-                fi
-
-                # Some Unity 2018 metas use per-axis wrap fields.
-                sed -Ei \
-                  's/^([[:space:]]*wrapU:)[[:space:]]*0([[:space:]]*)$/\1 1\2/;
-                   s/^([[:space:]]*wrapV:)[[:space:]]*0([[:space:]]*)$/\1 1\2/;
-                   s/^([[:space:]]*wrapW:)[[:space:]]*0([[:space:]]*)$/\1 1\2/' \
-                  "$META" || true
-                ;;
-            esac
-          done < <(
-            find "$PROJECT/Assets" -type f \
-              \( -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" \
-                 -o -iname "*.tga" -o -iname "*.psd" \) \
-              | sort
-          )
-
-          echo "Clamped UI textures:"
-          cat output/v24-clamped-ui-textures.txt || true
 
       - name: Create recovery report
         run: |
@@ -1705,7 +812,8 @@ jobs:
             echo "Recovered C# files: $(find "$PROJECT/Assets" -type f -name '*.cs' | wc -l)"
             echo "Recovered scenes: $(find "$PROJECT/Assets" -type f -name '*.unity' | wc -l)"
             echo
-            echo "Target: Sonic Release -> Unity 2018.2.0f2 iOS / arm64."
+            echo "Recovered editor: $(cat output/build-unity-version.txt | head -1 | cut -d= -f2-)"
+            echo "Target: Sonic P-06 Sonic Release -> iOS / arm64."
           } > output/RECOVERY-REPORT.txt
 
           cat output/RECOVERY-REPORT.txt
@@ -1726,10 +834,10 @@ jobs:
             output/scenes.txt
             output/android-csharp-references.txt
             output/touch-csharp-references.txt
+            output/controller-backends-clean.txt
+            output/recovered-project-version-original.txt
+            output/build-unity-version.txt
             output/removed-android-plugins.txt
-            output/removed-duplicate-spatialtracking.txt
-            output/v24-clamped-ui-textures.txt
-            output/v24-input-patched-files.txt
           compression-level: 0
 
   build_unity_ios:
@@ -1802,15 +910,16 @@ jobs:
           echo "===== PROJECT VERSION ====="
           cat "$VERSION_FILE"
 
-      - name: Verify fixed Unity version metadata
+      - name: Verify recovered Unity version metadata
         run: |
           set -e
-          echo "===== V5 DIRECT HUB FIX ACTIVE ====="
-          echo "Expected editor: 2018.2.0f2 (787658998520)"
-          echo "Recovered ProjectVersion.txt:"
+          echo "===== V5 CLEAN FULL-RELEASE BUILD ====="
+          echo "Recovered editor from recovery job: ${{ needs.recover.outputs.unity_version }}"
+          echo "Recovered changeset: ${{ needs.recover.outputs.unity_changeset }}"
+          echo "ProjectVersion.txt:"
           cat "${{ steps.locate.outputs.version_file }}"
 
-      - name: V13 stabilize old Unity project for Linux CI
+      - name: Stabilize recovered Sonic Release project for Linux CI
         run: |
           set -e
 
@@ -1826,14 +935,14 @@ jobs:
 
           # Attempt 1 preserves the game assets/settings; attempt 2 only resets GraphicsSettings.
           # The original GraphicsSettings is backed up before the fallback retry.
-          cat > "$PROJECT/SONIC-RELEASE-v1-CI-PATCH.txt" <<'EOF'
-          Sonic P-06 Sonic Release iOS v4
-          - use the NEWEST GitHub Release APK, selecting the largest APK asset
-          - reuse our proven AssetRipper -> Unity -> Xcode -> unsigned IPA pipeline
-          - keep old Unity 2018.2 compiler/Xcode fixes
-          - keep XInput/touch compatibility code where applicable
-          - keep icon and old-Unity shell-script permission fixes
-          - first run stops early if this APK uses a different Unity version/backend
+          cat > "$PROJECT/SONIC-RELEASE-v5-CI-PATCH.txt" <<'EOF'
+          Sonic P-06 Sonic Release iOS v5
+          - clean build for the FULL Sonic Release, not the old demo
+          - preserve AssetRipper's recovered Unity editor version
+          - do not inject old-demo touch/XInput/UI hacks before the first clean compile
+          - keep Android native-plugin cleanup
+          - keep old Unity compiler compatibility only as a fallback
+          - build iOS Xcode first; controls/graphics fixes come after a successful IPA
           EOF
 
       - name: Setup Node 22 for Unity CLI
@@ -1855,7 +964,7 @@ jobs:
 
           echo "===== INSTALL UNITY HUB DIRECTLY ====="
 
-          sudo apt-get update
+          sudo apt-get update -o Acquire::Retries=4 || true
           sudo apt-get install -y \
             ca-certificates \
             curl \
@@ -1875,7 +984,7 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/unityhub.list \
               >/dev/null
 
-          sudo apt-get update
+          sudo apt-get update -o Acquire::Retries=4 || true
           sudo apt-get install -y unityhub
 
           echo "===== HUB PACKAGE FILES ====="
@@ -2169,10 +1278,9 @@ jobs:
         with:
           projectPath: ${{ steps.locate.outputs.project }}
           targetPlatform: iOS
-          unityVersion: 2018.2.0f2
-          customImage: unityci/editor:ubuntu-2018.2.0f2-ios-3.2.2
+          unityVersion: ${{ needs.recover.outputs.unity_version }}
           buildsPath: build
-          buildName: Sonic2006-iOS
+          buildName: SonicP06-Release-iOS
           allowDirtyBuild: true
           versioning: None
           customParameters: -accept-apiupdate -force-glcore -force-gfx-st
@@ -2205,7 +1313,7 @@ jobs:
           set +e
 
           PROJECT="${{ steps.locate.outputs.project }}"
-          echo "===== V24 WARM RETRY ====="
+          echo "===== V5 CLEAN WARM RETRY ====="
           echo "Attempt 1 used legacy GL Core + single-threaded graphics."
           echo "For attempt 2 we also regenerate GraphicsSettings.asset."
 
@@ -2240,10 +1348,9 @@ jobs:
         with:
           projectPath: ${{ steps.locate.outputs.project }}
           targetPlatform: iOS
-          unityVersion: 2018.2.0f2
-          customImage: unityci/editor:ubuntu-2018.2.0f2-ios-3.2.2
+          unityVersion: ${{ needs.recover.outputs.unity_version }}
           buildsPath: build
-          buildName: Sonic2006-iOS
+          buildName: SonicP06-Release-iOS
           allowDirtyBuild: true
           versioning: None
           customParameters: -accept-apiupdate -force-glcore -force-gfx-st
@@ -2254,7 +1361,7 @@ jobs:
         run: |
           set +e
 
-          echo "===== V24 FINAL XCODE DETECTION ====="
+          echo "===== V5 FINAL XCODE DETECTION ====="
           echo "ATTEMPT1=${{ steps.unity_build_1.outcome }} / engine=${{ steps.unity_build_1.outputs.engineExitCode }}"
           echo "ATTEMPT2=${{ steps.unity_build_2.outcome }} / engine=${{ steps.unity_build_2.outputs.engineExitCode }}"
 
@@ -2298,13 +1405,15 @@ jobs:
           mkdir -p unity-build-diagnostics
 
           {
-            echo "V24=true"
+            echo "V5_CLEAN_RELEASE=true"
             echo "ATTEMPT1_OUTCOME=${{ steps.unity_build_1.outcome }}"
             echo "ATTEMPT1_ENGINE_EXIT=${{ steps.unity_build_1.outputs.engineExitCode }}"
             echo "ATTEMPT2_OUTCOME=${{ steps.unity_build_2.outcome }}"
             echo "ATTEMPT2_ENGINE_EXIT=${{ steps.unity_build_2.outputs.engineExitCode }}"
             echo "XCODE_READY=${{ steps.detect_xcode.outputs.ready }}"
             echo "PROJECT=${{ steps.locate.outputs.project }}"
+            echo "UNITY_VERSION=${{ needs.recover.outputs.unity_version }}"
+            echo "UNITY_CHANGESET=${{ needs.recover.outputs.unity_changeset }}"
           } > unity-build-diagnostics/summary.txt
 
           echo "===== FIND UNITY / CRASH LOGS ====="
@@ -2387,7 +1496,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v4
+          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v5
           path: unity-build-diagnostics
           if-no-files-found: ignore
           compression-level: 0
@@ -2414,10 +1523,30 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-Unity-iOS-FAIL-v4
+          name: Sonic-P06-Sonic-Release-Unity-iOS-FAIL-v5
           path: recovered-artifact
           if-no-files-found: ignore
           compression-level: 0
+
+      - name: Show exact Unity failure
+        if: always() && steps.detect_xcode.outputs.ready != 'true'
+        run: |
+          echo "=================================================="
+          echo "SONIC P-06 RELEASE v5 - EXACT UNITY FAILURE"
+          echo "Unity: ${{ needs.recover.outputs.unity_version }}"
+          echo "Attempt 1: ${{ steps.unity_build_1.outcome }} / engine=${{ steps.unity_build_1.outputs.engineExitCode }}"
+          echo "Attempt 2: ${{ steps.unity_build_2.outcome }} / engine=${{ steps.unity_build_2.outputs.engineExitCode }}"
+          echo "=================================================="
+
+          if [ -f unity-build-diagnostics/important-errors.txt ]; then
+            tail -220 unity-build-diagnostics/important-errors.txt
+          else
+            echo "important-errors.txt was not produced."
+          fi
+
+          echo
+          echo "Artifact: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v5"
+          exit 1
 
   package_unsigned_ipa:
     name: Package unsigned IPA from Xcode output
@@ -2607,16 +1736,16 @@ jobs:
             --sequesterRsrc \
             --keepParent \
             Payload \
-            output/Sonic-P06-Sonic-Release-iOS-KSign-v4.ipa
+            output/Sonic-P06-Sonic-Release-iOS-v5.ipa
 
-          ls -lh output/Sonic-P06-Sonic-Release-iOS-KSign-v4.ipa
+          ls -lh output/Sonic-P06-Sonic-Release-iOS-v5.ipa
 
       - name: Upload Sonic iOS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-iOS-KSign-v4
+          name: Sonic-P06-Sonic-Release-iOS-v5
           path: |
-            output/Sonic-P06-Sonic-Release-iOS-KSign-v4.ipa
+            output/Sonic-P06-Sonic-Release-iOS-v5.ipa
             xcodebuild.log
           compression-level: 0
 
@@ -2708,7 +1837,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-FULL-Unity-Log-v4
+          name: Sonic-P06-Sonic-Release-FULL-Unity-Log-v5
           path: full-unity-log
           if-no-files-found: warn
           compression-level: 0
