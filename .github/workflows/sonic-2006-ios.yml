@@ -1,4 +1,4 @@
-name: Sonic P-06 iOS - v10 FAST (2 jobs)
+name: Sonic P-06 iOS - v11 FAST (scene path fix)
 
 on:
   workflow_dispatch:
@@ -758,10 +758,10 @@ jobs:
                -o -name "IOSNativeMobileUICleaner.cs" \) \
             -print -delete 2>/dev/null || true
 
-          echo "V10 clean build: no old-demo touch/UI scripts injected."
+          echo "V11 clean build: no old-demo touch/UI scripts injected."
 
 
-          echo "===== V10 CREATE SCENE-SAFE IOS BUILD METHOD ====="
+          echo "===== V11 CREATE SCENE-SAFE IOS BUILD METHOD ====="
           mkdir -p "$PROJECT/Assets/Editor"
 
           cat > "$PROJECT/Assets/Editor/SonicIOSBuild.cs" <<'CS'
@@ -847,10 +847,30 @@ jobs:
                   if (string.IsNullOrWhiteSpace(path))
                       return false;
 
-                  if (!path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
+                  string normalized = path.Replace('\\', '/');
+
+                  if (!normalized.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
                       return false;
 
-                  return File.Exists(Path.GetFullPath(path));
+                  // Unity scene paths are project-relative (Assets/...).
+                  // GameCI does not guarantee that the Editor process CWD is the
+                  // recovered project root, so Path.GetFullPath(path) can point at
+                  // /github/workspace/Assets/... and reject every real scene.
+                  // Ask Unity's AssetDatabase first, then use Application.dataPath
+                  // to build an absolute project-root path as a filesystem fallback.
+                  SceneAsset sceneAsset = AssetDatabase.LoadAssetAtPath<SceneAsset>(normalized);
+                  if (sceneAsset != null)
+                      return true;
+
+                  string projectRoot = Directory.GetParent(Application.dataPath).FullName;
+                  string absolute = Path.Combine(projectRoot, normalized);
+                  bool exists = File.Exists(absolute);
+
+                  if (!exists)
+                      Debug.LogWarning("V11 rejected scene path: " + normalized +
+                                       " -> " + absolute);
+
+                  return exists;
               }
           }
           CS
@@ -916,7 +936,7 @@ jobs:
           PROJECT="${{ steps.prepare_ios.outputs.project_path }}"
           VERSION_FILE="$PROJECT/ProjectSettings/ProjectVersion.txt"
 
-          echo "===== V10 FAST: EXACT ASSETRIPPER PROJECT PATH ====="
+          echo "===== V11 FAST: EXACT ASSETRIPPER PROJECT PATH ====="
           echo "PROJECT=$PROJECT"
 
           test -n "$PROJECT"
@@ -948,7 +968,7 @@ jobs:
           # Attempt 1 preserves the game assets/settings; attempt 2 only resets GraphicsSettings.
           # The original GraphicsSettings is backed up before the fallback retry.
           cat > "$PROJECT/SONIC-RELEASE-v5-CI-PATCH.txt" <<'EOF'
-          Sonic P-06 Sonic Release iOS v10 FAST
+          Sonic P-06 Sonic Release iOS v11 FAST
           - clean build for the FULL Sonic Release, not the old demo
           - preserve AssetRipper's recovered Unity editor version
           - do not inject old-demo touch/XInput/UI hacks before the first clean compile
@@ -1057,7 +1077,7 @@ jobs:
         run: |
           set -e
 
-          echo "===== V10 LICENSING CLIENT FIX ACTIVE ====="
+          echo "===== V11 LICENSING CLIENT FIX ACTIVE ====="
 
           find_client() {
             find \
@@ -1131,7 +1151,7 @@ jobs:
         run: |
           set -e
 
-          echo "===== V10 PERSONAL ACTIVATION ====="
+          echo "===== V11 PERSONAL ACTIVATION ====="
           echo "UNITY_HUB_PATH=$UNITY_HUB_PATH"
 
           test -x "$UNITY_HUB_PATH"
@@ -1215,7 +1235,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-2006-Unity-License-Diagnostics-v10
+          name: Sonic-2006-Unity-License-Diagnostics-v11
           path: licensing-diagnostics
           if-no-files-found: ignore
           compression-level: 0
@@ -1297,7 +1317,7 @@ jobs:
           allowDirtyBuild: true
           versioning: None
           buildMethod: SonicIOSBuild.PerformBuild
-          customParameters: -accept-apiupdate
+          customParameters: -accept-apiupdate -logFile /github/workspace/unity-attempt1.log
 
       - name: Inspect attempt 1
         id: detect_xcode_1
@@ -1327,8 +1347,8 @@ jobs:
           set +e
 
           PROJECT="${{ steps.prepare_ios.outputs.project_path }}"
-          echo "===== V10 FAST WARM RETRY ====="
-          echo "Attempt 1 used the V10 scene-safe iOS builder."
+          echo "===== V11 FAST WARM RETRY ====="
+          echo "Attempt 1 used the V11 scene-safe iOS builder."
           echo "For attempt 2 we keep the scene-safe builder and regenerate GraphicsSettings.asset."
 
           mkdir -p v17-backup
@@ -1369,7 +1389,7 @@ jobs:
           allowDirtyBuild: true
           versioning: None
           buildMethod: SonicIOSBuild.PerformBuild
-          customParameters: -accept-apiupdate
+          customParameters: -accept-apiupdate -logFile /github/workspace/unity-attempt2.log
 
       - name: Detect generated iOS Xcode project
         id: detect_xcode
@@ -1377,7 +1397,7 @@ jobs:
         run: |
           set +e
 
-          echo "===== V10 FAST FINAL XCODE DETECTION ====="
+          echo "===== V11 FAST FINAL XCODE DETECTION ====="
           echo "ATTEMPT1=${{ steps.unity_build_1.outcome }} / engine=${{ steps.unity_build_1.outputs.engineExitCode }}"
           echo "ATTEMPT2=${{ steps.unity_build_2.outcome }} / engine=${{ steps.unity_build_2.outputs.engineExitCode }}"
 
@@ -1421,7 +1441,7 @@ jobs:
           mkdir -p unity-build-diagnostics
 
           {
-            echo "V5_CLEAN_RELEASE=true"
+            echo "V11_SCENE_PATH_FIX=true"
             echo "ATTEMPT1_OUTCOME=${{ steps.unity_build_1.outcome }}"
             echo "ATTEMPT1_ENGINE_EXIT=${{ steps.unity_build_1.outputs.engineExitCode }}"
             echo "ATTEMPT2_OUTCOME=${{ steps.unity_build_2.outcome }}"
@@ -1433,6 +1453,12 @@ jobs:
           } > unity-build-diagnostics/summary.txt
 
           echo "===== FIND UNITY / CRASH LOGS ====="
+
+          for LOG in unity-attempt1.log unity-attempt2.log; do
+            if [ -s "$LOG" ]; then
+              cp "$LOG" "unity-build-diagnostics/$LOG" || true
+            fi
+          done
 
           PROJECT="${{ steps.prepare_ios.outputs.project_path }}"
 
@@ -1450,7 +1476,6 @@ jobs:
               -type f \
               \( -iname "*.log" \
                  -o -iname "Editor.log" \
-                 -o -iname "*.txt" \
                  -o -iname "core" \
                  -o -iname "core.*" \
                  -o -iname "*.dmp" \) \
@@ -1504,7 +1529,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-iOS-Xcode-v10-FAST
+          name: Sonic-P06-iOS-Xcode-v11-FAST
           path: build
           compression-level: 0
 
@@ -1512,7 +1537,7 @@ jobs:
         if: steps.detect_xcode.outputs.ready != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v10
+          name: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v11
           path: unity-build-diagnostics
           if-no-files-found: ignore
           compression-level: 0
@@ -1521,7 +1546,7 @@ jobs:
         if: always() && steps.detect_xcode.outputs.ready != 'true'
         run: |
           echo "=================================================="
-          echo "SONIC P-06 RELEASE v10 FAST - EXACT UNITY FAILURE"
+          echo "SONIC P-06 RELEASE v11 FAST - EXACT UNITY FAILURE"
           echo "Unity: ${{ steps.prepare_ios.outputs.unity_version }}"
           echo "Attempt 1: ${{ steps.unity_build_1.outcome }} / engine=${{ steps.unity_build_1.outputs.engineExitCode }}"
           echo "Attempt 2: ${{ steps.unity_build_2.outcome }} / engine=${{ steps.unity_build_2.outputs.engineExitCode }}"
@@ -1534,7 +1559,7 @@ jobs:
           fi
 
           echo
-          echo "Artifact: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v10"
+          echo "Artifact: Sonic-P06-Sonic-Release-Unity-Build-Diagnostics-v11"
           exit 1
 
   make_ipa:
@@ -1548,7 +1573,7 @@ jobs:
       - name: Download Unity Xcode project
         uses: actions/download-artifact@v4
         with:
-          name: Sonic-P06-iOS-Xcode-v10-FAST
+          name: Sonic-P06-iOS-Xcode-v11-FAST
           path: unity-ios
 
       - name: Patch old Unity 2018 headers for current Xcode
